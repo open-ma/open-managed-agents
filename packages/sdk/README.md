@@ -31,6 +31,29 @@ const card = await client.oma.modelCards.create({
 });
 ```
 
+Agent extensions stay on the official resource under the optional `_oma`
+namespace and are strongly typed on create, update, Agent responses, and
+version-pinned Session snapshots:
+
+```ts
+const agent = await client.beta.agents.create({
+  name: "reviewer",
+  model: { id: "deepseek-main", speed: "fast" },
+  _oma: {
+    aux_model: { id: "deepseek-aux" },
+    appendable_prompts: ["prompt_review"],
+    harness: "pi",
+  },
+});
+
+const session = await client.beta.sessions.create({
+  agent: agent.id,
+  environment_id: "env_default",
+});
+
+console.log(session.agent._oma?.aux_model?.id);
+```
+
 ## Object model
 
 ```ts
@@ -77,6 +100,9 @@ await client.beta.agents.create({
     effort: { type: "high" },
     speed: "fast",
     inference_geo: "us",
+    provider_options: {
+      pi: { reasoning: "off", samplingParams: { temperature: 0 } },
+    },
   },
 });
 ```
@@ -87,11 +113,21 @@ await client.beta.agents.create({
 | `model.effort` | Maps to Pi `thinkingLevel`. Pi normalizes unsupported levels to the nearest level supported by that model (for example DeepSeek `medium` becomes `high`). |
 | `model.speed` | `standard` leaves Pi defaults unchanged. `fast` maps to Anthropic fast mode or OpenAI priority service tier. Other Pi APIs fail explicitly instead of silently ignoring it. |
 | `model.inference_geo` | Accepted, versioned, and returned in the official shape. OpenMA currently does not use it for provider/region routing. |
+| `model.provider_options` | OpenMA JSON extension for provider-namespaced request options. The main turn and compaction paths receive the main model options; tool-internal model calls receive `_oma.aux_model.provider_options`. Pi-specific request overrides belong under the `pi` key. |
 
 `speed` is request policy and therefore must not be placed in `pi_config`.
 Whether a specific effort level is usable is discoverable through
 `client.beta.models`; capability flags are conservatively derived from Pi's
 model metadata.
+
+Agent create/update bodies are validated JSON objects. The Console's YAML
+editor is only an authoring view: it parses YAML into the same structured
+request and never stores YAML text. The server normalizes the request into a
+versioned Agent document, stores that document as JSON, and atomically retains
+the previous document in `managed_agent_versions` on update. Unknown root
+fields are rejected; OpenMA fields belong under `_oma`, while model-provider
+options belong under `model.provider_options` (or
+`_oma.aux_model.provider_options`).
 
 ## Pi-backed Model Cards
 

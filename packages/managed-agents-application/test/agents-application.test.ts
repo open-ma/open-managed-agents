@@ -113,6 +113,110 @@ class MemoryAgentStore implements AgentStore {
 }
 
 describe("AgentsApplicationService", () => {
+  it("rejects metadata that exceeds the official stored limits", async () => {
+    const service = new AgentsApplicationService({
+      workspaceId: "workspace_01",
+      store: new MemoryAgentStore(),
+      clock: { now: () => new Date("2026-08-26T00:00:00.000Z") },
+      ids: { nextAgentId: () => "agent_metadata" },
+    });
+    const sixteenEntries = Object.fromEntries(
+      Array.from({ length: 16 }, (_, index) => [`key-${index}`, "value"]),
+    );
+
+    expect(
+      await service.createAgent({
+        name: "Too much metadata",
+        model: "claude-opus-5",
+        metadata: { ...sixteenEntries, overflow: "value" },
+      }),
+    ).toEqual({
+      type: "invalid_request",
+      message: "Agent metadata may contain at most 16 keys",
+    });
+
+    await service.createAgent({
+      name: "Metadata agent",
+      model: "claude-opus-5",
+      metadata: sixteenEntries,
+    });
+    expect(
+      await service.updateAgent({
+        agentId: "agent_metadata",
+        metadata: { overflow: "value" },
+      }),
+    ).toEqual({
+      type: "invalid_request",
+      message: "Agent metadata may contain at most 16 keys",
+    });
+  });
+
+  it("rejects inconsistent MCP configurations before persistence", async () => {
+    const service = new AgentsApplicationService({
+      workspaceId: "workspace_01",
+      store: new MemoryAgentStore(),
+      clock: { now: () => new Date("2026-08-26T00:00:00.000Z") },
+      ids: { nextAgentId: () => "agent_mcp" },
+    });
+
+    expect(
+      await service.createAgent({
+        name: "Duplicate MCP",
+        model: "claude-opus-5",
+        mcpServers: [
+          { type: "url", name: "docs", url: "https://one.test" },
+          { type: "url", name: "docs", url: "https://two.test" },
+        ],
+        tools: [{ type: "mcp_toolset", mcpServerName: "docs" }],
+      }),
+    ).toMatchObject({ type: "invalid_request", message: expect.stringMatching(/unique/i) });
+
+    expect(
+      await service.createAgent({
+        name: "Unreferenced MCP",
+        model: "claude-opus-5",
+        mcpServers: [{ type: "url", name: "docs", url: "https://docs.test" }],
+      }),
+    ).toMatchObject({ type: "invalid_request", message: expect.stringMatching(/referenced/i) });
+
+    await service.createAgent({
+      name: "Valid MCP",
+      model: "claude-opus-5",
+      mcpServers: [{ type: "url", name: "docs", url: "https://docs.test" }],
+      tools: [{ type: "mcp_toolset", mcpServerName: "docs" }],
+    });
+    expect(
+      await service.updateAgent({ agentId: "agent_mcp", tools: null }),
+    ).toMatchObject({ type: "invalid_request", message: expect.stringMatching(/referenced/i) });
+  });
+
+  it("rejects invalid multiagent roster cardinality and duplicates", async () => {
+    const service = new AgentsApplicationService({
+      workspaceId: "workspace_01",
+      store: new MemoryAgentStore(),
+      clock: { now: () => new Date("2026-08-26T00:00:00.000Z") },
+      ids: { nextAgentId: () => "agent_multi" },
+    });
+
+    expect(
+      await service.createAgent({
+        name: "Empty coordinator",
+        model: "claude-opus-5",
+        multiagent: { type: "coordinator", agents: [] },
+      }),
+    ).toMatchObject({ type: "invalid_request", message: expect.stringMatching(/1.*20/i) });
+    expect(
+      await service.createAgent({
+        name: "Duplicate self",
+        model: "claude-opus-5",
+        multiagent: {
+          type: "coordinator",
+          agents: [{ type: "self" }, { type: "self" }],
+        },
+      }),
+    ).toMatchObject({ type: "invalid_request", message: expect.stringMatching(/distinct|self/i) });
+  });
+
   it("creates and persists the canonical initial agent state", async () => {
     const service = new AgentsApplicationService({
       workspaceId: "workspace_01",
@@ -152,6 +256,95 @@ describe("AgentsApplicationService", () => {
     });
   });
 
+  it("versions OpenMA extensions atomically and supports explicit field clears", async () => {
+    let now = new Date("2026-08-26T00:00:00.000Z");
+    const service = new AgentsApplicationService({
+      workspaceId: "workspace_01",
+      store: new MemoryAgentStore(),
+      clock: { now: () => now },
+      ids: { nextAgentId: () => "agent_openma" },
+    });
+
+    await service.createAgent({
+      name: "Extended Agent",
+      model: {
+        id: "claude-opus-5",
+        providerOptions: { anthropic: { beta: ["context-1m"] } },
+      },
+      openma: {
+        auxiliaryModel: {
+          id: "deepseek-chat",
+          speed: "fast",
+          providerOptions: { deepseek: { thinking: { type: "disabled" } } },
+        },
+        appendablePrompts: ["prompt_review"],
+        harness: "pi",
+      },
+    });
+    now = new Date("2026-08-26T01:00:00.000Z");
+    const updated = await service.updateAgent({
+      agentId: "agent_openma",
+      expectedVersion: 1,
+      openma: {
+        auxiliaryModel: null,
+        appendablePrompts: [],
+      },
+    });
+    const previous = await service.retrieveAgent({
+      agentId: "agent_openma",
+      version: 1,
+    });
+
+    expect(updated).toMatchObject({
+      type: "updated",
+      agent: {
+        version: 2,
+        openma: {
+          appendablePrompts: [],
+          harness: "pi",
+        },
+      },
+    });
+    expect(updated).not.toMatchObject({
+      agent: { openma: { auxiliaryModel: expect.anything() } },
+    });
+    expect(previous).toMatchObject({
+      type: "found",
+      agent: {
+        version: 1,
+        openma: {
+          auxiliaryModel: {
+            id: "deepseek-chat",
+            speed: "fast",
+            providerOptions: { deepseek: { thinking: { type: "disabled" } } },
+          },
+          appendablePrompts: ["prompt_review"],
+          harness: "pi",
+        },
+      },
+    });
+    expect(previous).toMatchObject({
+      type: "found",
+      agent: {
+        model: {
+          providerOptions: { anthropic: { beta: ["context-1m"] } },
+        },
+      },
+    });
+
+    now = new Date("2026-08-26T02:00:00.000Z");
+    const cleared = await service.updateAgent({
+      agentId: "agent_openma",
+      expectedVersion: 2,
+      openma: {
+        appendablePrompts: null,
+        harness: null,
+      },
+    });
+    expect(cleared).toMatchObject({ type: "updated", agent: { version: 3 } });
+    expect(cleared).not.toHaveProperty("agent.openma");
+  });
+
   it("resolves toolset defaults and per-tool inheritance before persistence", async () => {
     const service = new AgentsApplicationService({
       workspaceId: "workspace_01",
@@ -163,6 +356,9 @@ describe("AgentsApplicationService", () => {
     const created = await service.createAgent({
       name: "Tool Agent",
       model: "claude-opus-5",
+      mcpServers: [
+        { type: "url", name: "docs", url: "https://docs.example.test" },
+      ],
       tools: [
         {
           type: "agent_toolset_20260401",
@@ -254,7 +450,10 @@ describe("AgentsApplicationService", () => {
       mcpServers: [{ type: "url", name: "docs", url: "https://mcp.test" }],
       skills: [{ type: "anthropic", skillId: "pdf" }],
       system: "Initial system prompt",
-      tools: [{ type: "agent_toolset_20260401" }],
+      tools: [
+        { type: "agent_toolset_20260401" },
+        { type: "mcp_toolset", mcpServerName: "docs" },
+      ],
     });
     now = new Date("2026-08-26T01:00:00.000Z");
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { withReportedArtifactPublication } from "../src/openai-artifact-publication";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type {
@@ -59,6 +60,29 @@ interface RunnerConstructor {
       session: Session;
       environment: Environment;
     }): Promise<SandboxExecutor>;
+    prepareSandbox?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+    }): Promise<void>;
+    synchronizeSandbox?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+      executionFence: NonNullable<NodeManagedSessionRunnerAcceptInput["executionFence"]>;
+    }): Promise<void>;
+    afterExecution?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+      executionFence: NonNullable<NodeManagedSessionRunnerAcceptInput["executionFence"]>;
+    }): Promise<void>;
     buildModel(input: {
       workspaceId: string;
       session: Session;
@@ -70,6 +94,7 @@ interface RunnerConstructor {
       environment: Environment;
       sandbox: SandboxExecutor;
     }): Promise<unknown>;
+    disposeTools?(tools: unknown): Promise<void>;
     buildHarness(): { run(context: unknown): Promise<void> };
     buildHarnessContext(input: {
       workspaceId: string;
@@ -128,10 +153,153 @@ interface RunnerConstructor {
     };
     clock: { now(): Date };
     ids: { nextEventId(): string };
-  }): NodeManagedSessionRunner;
+    runtimeGenerations?: { next(): string };
+  }): NodeManagedSessionRunner & { connectedSandbox(input: { workspaceId: string; sessionId: string }): SandboxExecutor | null };
 }
 
 describe("DefaultNodeManagedSessionRunner", () => {
+  it("prepares Session inputs after sandbox creation and before it becomes executable", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    const order: string[] = [];
+    const sandbox = {
+      destroy: vi.fn(async () => { order.push("destroy"); }),
+    } as unknown as SandboxExecutor;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => {
+        order.push("build");
+        return sandbox;
+      },
+      prepareSandbox: async (input) => {
+        expect(input).toMatchObject({
+          workspaceId: "workspace_01",
+          session,
+          environment,
+          sandbox,
+        });
+        order.push("prepare");
+      },
+      buildModel: async () => {
+        order.push("model");
+        return {};
+      },
+      buildTools: async () => {
+        order.push("tools");
+        return {};
+      },
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
+      ids: { nextEventId: () => "event_inputs" },
+    });
+
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBeNull();
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    expect(order).toEqual(["build", "prepare"]);
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBe(sandbox);
+    expect(runner.connectedSandbox({ workspaceId: "workspace_other", sessionId: session.id })).toBeNull();
+    await runner.stop({ workspaceId: "workspace_01", sessionId: session.id });
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBeNull();
+  });
+
+  it("destroys a new sandbox when Session input preparation fails", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    const destroy = vi.fn(async () => undefined);
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => ({ destroy } as unknown as SandboxExecutor),
+      prepareSandbox: async () => { throw new Error("input staging failed"); },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
+      ids: { nextEventId: () => "event_inputs" },
+    });
+
+    await expect(runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    })).rejects.toThrow("input staging failed");
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("replaces a prepared sandbox when the Session resource snapshot changes", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    const destroyed: number[] = [];
+    const preparedResourceCounts: number[] = [];
+    let generation = 0;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => {
+        generation += 1;
+        const current = generation;
+        return {
+          destroy: async () => { destroyed.push(current); },
+        } as SandboxExecutor;
+      },
+      prepareSandbox: async ({ session }) => {
+        preparedResourceCounts.push(session.resources.length);
+      },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
+      ids: { nextEventId: () => "event_resource_refresh" },
+    });
+    const changedSession: Session = {
+      ...session,
+      resources: [{
+        id: "sesrsc_file_01",
+        type: "file",
+        createdAt: "2026-08-26T03:00:00.000Z",
+        fileId: "file_01",
+        mountPath: "/mnt/session/uploads/file_01",
+        updatedAt: "2026-08-26T03:00:00.000Z",
+      }],
+    };
+
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session: changedSession,
+      environment,
+      initialEvents: [],
+    });
+
+    expect(preparedResourceCounts).toEqual([0, 1]);
+    expect(destroyed).toEqual([1]);
+  });
+
   it("runs a user message between official lifecycle events", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath).catch(
@@ -145,15 +313,48 @@ describe("DefaultNodeManagedSessionRunner", () => {
     } as RunnerConstructor;
     const sandbox = {} as SandboxExecutor;
     const contexts: unknown[] = [];
+    const lifecycle: string[] = [];
+    const builtTools = { bash: { type: "tool" } };
     let nextId = 0;
     const runner = new Runner({
       outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
       confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
       buildSandbox: async () => sandbox,
       buildModel: async () => ({ type: "model" }),
-      buildTools: async () => ({ bash: { type: "tool" } }),
+      buildTools: async () => builtTools,
+      disposeTools: async (tools) => {
+        expect(tools).toBe(builtTools);
+        lifecycle.push("dispose");
+      },
+      synchronizeSandbox: async (input) => {
+        expect(input).toMatchObject({
+          workspaceId: "workspace_01",
+          session,
+          environment,
+          sandbox,
+          runtimeGeneration: "runtime_generation_01",
+          executionFence: {
+            executionId: "event_user_01",
+            attemptId: "attempt_01",
+            ownerId: "worker_01",
+            generation: 1,
+          },
+        });
+        lifecycle.push("synchronize");
+      },
+      afterExecution: withReportedArtifactPublication(async input => {
+        expect(input.executionFence.executionId).toBe("event_user_01");
+        expect(lifecycle.at(-1)).toBe("idle");
+        lifecycle.push("afterExecution");
+        throw new Error("Output copy failed after completion");
+      }, (error, input) => {
+        expect(error).toMatchObject({ message: "Output copy failed after completion" });
+        expect(input.session.id).toBe(session.id);
+        lifecycle.push("publicationReported");
+      }),
       buildHarness: () => ({
         run: async (context) => {
+          lifecycle.push("run");
           const runtime = (context as {
             runtime: { broadcast(event: SessionEvent): void };
           }).runtime;
@@ -169,6 +370,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
       },
       clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
       ids: { nextEventId: () => `event_runtime_0${++nextId}` },
+      runtimeGenerations: { next: () => "runtime_generation_01" },
     });
     await runner.start({
       workspaceId: "workspace_01",
@@ -192,7 +394,21 @@ describe("DefaultNodeManagedSessionRunner", () => {
       initialEvents: [],
       events: [event],
       historyEvents: [event],
-      output: async (frame) => { output.push(frame); },
+      executionFence: {
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        executionId: "event_user_01",
+        attemptId: "attempt_01",
+        ownerId: "worker_01",
+        generation: 1,
+        expiresAt: "2026-08-26T02:01:00.000Z",
+      },
+      output: async (frame) => {
+        output.push(frame);
+        if ((frame as { type?: string }).type === "session.status_idle") {
+          lifecycle.push("idle");
+        }
+      },
     });
 
     expect(contexts).toEqual([
@@ -226,6 +442,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
         processed_at: "2026-08-26T02:00:00.000Z",
       },
     ]);
+    expect(lifecycle).toEqual(["run", "dispose", "synchronize", "idle", "afterExecution", "publicationReported"]);
   });
 
   it("projects a terminal session error before returning a harness failure", async () => {
@@ -297,6 +514,84 @@ describe("DefaultNodeManagedSessionRunner", () => {
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
         processed_at: "2026-08-26T03:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("projects a terminal error and idle state when fenced final collection fails", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    let nextId = 0;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => ({} as SandboxExecutor),
+      synchronizeSandbox: async () => { throw new Error("final collect failed"); },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => {} }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T03:15:00.000Z") },
+      ids: { nextEventId: () => `event_collect_failure_0${++nextId}` },
+    });
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    const output: unknown[] = [];
+    const event: NodeManagedSessionRunnerAcceptInput["events"][number] = {
+      id: "event_user_collect_failure",
+      type: "user.message",
+      content: [{ type: "text", text: "Collect" }],
+      processedAt: "2026-08-26T03:14:00.000Z",
+    };
+
+    await expect(runner.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+      events: [event],
+      historyEvents: [event],
+      executionFence: {
+        executionId: "execution_collect_failure",
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        attemptId: "attempt_collect_failure",
+        ownerId: "node_01",
+        generation: 1,
+        expiresAt: "2026-08-26T03:16:00.000Z",
+      },
+      output: async (frame) => { output.push(frame); },
+    })).rejects.toThrow("final collect failed");
+
+    expect(output).toEqual([
+      {
+        id: "event_collect_failure_01",
+        type: "session.status_running",
+        processed_at: "2026-08-26T03:15:00.000Z",
+      },
+      {
+        id: "event_collect_failure_02",
+        type: "session.error",
+        error: {
+          type: "unknown_error",
+          message: "final collect failed",
+          retry_status: "terminal",
+        },
+        processed_at: "2026-08-26T03:15:00.000Z",
+      },
+      {
+        id: "event_collect_failure_03",
+        type: "session.status_idle",
+        stop_reason: { type: "end_turn" },
+        processed_at: "2026-08-26T03:15:00.000Z",
       },
     ]);
   });

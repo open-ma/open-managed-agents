@@ -43,6 +43,7 @@ services:
       SANDBOX_WORKDIR: /app/data/sandboxes
       MEMORY_BLOB_DIR: /app/data/memory-blobs
       SESSION_OUTPUTS_DIR: /app/data/session-outputs
+      SANDBOX_PROVIDER: ${SANDBOX_PROVIDER:?Set SANDBOX_PROVIDER to an isolated provider}
       OMA_VAULT_PROXY_URL: http://oma-vault:14322
       OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}

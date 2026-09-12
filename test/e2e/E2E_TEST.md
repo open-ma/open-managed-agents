@@ -224,3 +224,38 @@ npx playwright test test/e2e/console.spec.ts --headed
 # Single test
 npx playwright test test/e2e/console.spec.ts -g "signup"
 ```
+
+## Beta/release gate
+
+The ordinary `pnpm test` suite deliberately does not contact a deployed
+service. Before a beta cut, run the explicit gate below. It refuses to run
+unless a target URL, temporary API key, and either a deterministic mock model
+or an explicitly selected real model are supplied. The gate forces a real
+Managed Agents turn, then runs the deployed Console path and a CLI API call;
+the product Worker, SessionDO, event stream, and storage remain real.
+
+```bash
+OMA_E2E_BASE_URL=https://app.staging.openma.dev \
+OMA_E2E_API_KEY="$TEST_API_KEY" \
+OMA_E2E_MOCK_MODEL_BASE_URL=https://oma-mock-services.example.workers.dev \
+pnpm test:e2e:release
+```
+
+Set `OMA_E2E_MOCK_SERVICES_BASE_URL` to also run the deployed fixture's
+OAuth and MCP HTTP smoke matrix (`/authorize`, token exchange/refresh,
+401-once, 403-always and expiry). This is optional because the deterministic
+protocol suite already covers the same state transitions without network
+flakiness:
+
+```bash
+OMA_E2E_MOCK_SERVICES_BASE_URL=https://oma-mock-services.example.workers.dev \
+OMA_E2E_BASE_URL=https://app.staging.openma.dev \
+OMA_E2E_API_KEY="$TEST_API_KEY" \
+OMA_E2E_MOCK_MODEL_BASE_URL=https://oma-mock-services.example.workers.dev \
+pnpm test:e2e:release
+```
+
+Set `OMA_E2E_RUN_BRIDGE=1` only on a disposable staging CLI profile. That lane
+installs/restarts a local daemon and is intentionally opt-in because it can
+replace an existing profile service. MCP OAuth/fault scenarios are exercised
+by `test/e2e/e2e-mock-services.sh` and the deterministic protocol/chaos suites.

@@ -1,0 +1,74 @@
+{
+  "name": "@open-managed-agents/harness-runtime-acp",
+  "version": "0.1.0",
+  "description": "OpenMA whole-brain ACP supervisor for managed sandbox runtimes.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "openma-acp-supervisor": "./dist/node-cli.js",
+    "openma-acp-work-item": "./dist/node-work-item-cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./http-control": {
+      "types": "./dist/http-control.d.ts",
+      "import": "./dist/http-control.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    },
+    "./node-supervisor": {
+      "types": "./dist/node-supervisor.d.ts",
+      "import": "./dist/node-supervisor.js"
+    },
+    "./node-work-item": {
+      "types": "./dist/node-work-item.d.ts",
+      "import": "./dist/node-work-item.js"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "pnpm run clean && tsc -p tsconfig.build.json && esbuild src/node-cli.ts src/node-work-item-cli.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --banner:js=\"#!/usr/bin/env node\"",
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://openma.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openma-ai/open-managed-agents",
+    "directory": "packages/harness-runtime-acp"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.120.0",
+    "@open-managed-agents/acp-runtime": "workspace:*",
+    "@open-managed-agents/harness-supervisor": "workspace:*",
+    "@open-managed-agents/managed-runtime-host": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
+    "@open-managed-agents/runtime": "workspace:*",
+    "@openma/common": "github:openma-ai/openma-common#00358ff9c1e4a694171f5617a4715602c61433e7",
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "esbuild": "^0.25.0",
+    "vitest": "^4.1.3"
+  }
+}

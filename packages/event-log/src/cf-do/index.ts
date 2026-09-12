@@ -324,12 +324,17 @@ export class CfDoPendingQueue implements PendingQueueRepo {
     this.sql.exec(
       `INSERT INTO pending_events
          (enqueued_at, session_thread_id, type, event_id, data)
-       VALUES (?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM pending_events
+           WHERE event_id = ? AND cancelled_at IS NULL
+        )`,
       Date.now(),
       threadId,
       event.type,
       eventId,
       fullData,
+      eventId,
     );
   }
 
@@ -612,6 +617,11 @@ export function ensureSchema(sql: SqlStorage): void {
   sql.exec(`
     CREATE INDEX IF NOT EXISTS idx_pending_active
       ON pending_events(session_thread_id, pending_seq)
+      WHERE cancelled_at IS NULL
+  `);
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_event_id
+      ON pending_events(event_id)
       WHERE cancelled_at IS NULL
   `);
 }

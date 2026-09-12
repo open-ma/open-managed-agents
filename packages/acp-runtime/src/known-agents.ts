@@ -11,9 +11,8 @@
  *      the registry switch. Same mechanism that handled the
  *      claude-code-acp → claude-agent-acp rename.
  *
- *   2. **Agents not in the official registry yet**: hermes (Nous Research,
- *      pip-install only) and openclaw (gateway-bridge mode) have no entry
- *      upstream. OMA users still want them, so we ship full entries here.
+ *   2. **Agents not in the official registry yet**: MCode and Hermes ship
+ *      complete OMA entries until compatible upstream entries exist.
  *
  * Browser-safe (no node deps): the daemon resolves `aliases` and the
  * Console renders `installHint` for our overlay-only entries. The daemon
@@ -49,8 +48,7 @@ export interface KnownAgentEntry {
   aliases?: string[];
   /**
    * UI signal: this agent is one of the four OMA promotes as "first
-   * class" in the Console (claude-acp, codex-acp, openclaw, hermes as
-   * of v0.3.x). Featured agents render in the dropdown's first group;
+   * class" in the Console. Featured agents render in the dropdown's first group;
    * other detected agents render below. Set by overlay only — official
    * entries are never featured-by-default.
    */
@@ -160,6 +158,63 @@ export const OMA_OVERLAY_AGENTS: KnownAgentEntry[] = [
     installHint: "npm install -g opencode-ai@latest  # or curl -fsSL https://opencode.ai/install | bash",
     homepage: "https://opencode.ai/",
   },
+  // Aider does not ship an ACP server. This community bridge is a real ACP
+  // process which invokes the installed `aider` CLI, so the upstream binary
+  // is kept explicit instead of pretending `aider` itself speaks ACP.
+  {
+    id: "aider",
+    label: "Aider",
+    spec: { command: "aider-acp" },
+    wraps: "aider",
+    installHint:
+      "install aider-chat, then build https://github.com/jorgejhms/aider-acp and put aider-acp on PATH",
+    homepage: "https://github.com/jorgejhms/aider-acp",
+  },
+  // Kimi Code exposes a native ACP stdio server. Keep it separate from the
+  // official `kimi` registry id because Harbor's Kimi Code CLI and Moonshot's
+  // Kimi CLI have different launch/configuration surfaces.
+  {
+    id: "kimi-code",
+    label: "Kimi Code",
+    spec: { command: "kimi", args: ["acp"] },
+    installHint: "install Kimi Code, then run `kimi acp`",
+    homepage: "https://github.com/MoonshotAI/kimi-cli",
+  },
+  // MiMo Code is OpenCode-derived and exposes its own ACP stdio command.
+  // Keep the entry overlay-only until the upstream ACP registry publishes a
+  // stable canonical id and distribution recipe.
+  {
+    id: "mimo",
+    label: "MiMo Code",
+    spec: { command: "mimo", args: ["acp"] },
+    install: { kind: "npm", package: "@mimo-ai/cli" },
+    installHint: "npm install -g @mimo-ai/cli",
+    homepage: "https://github.com/XiaomiMiMo/MiMo-Code",
+  },
+  // pi-acp is in the official registry. Keep an overlay entry as well so
+  // network-isolated hosts can still discover it, and so wrapper audit knows
+  // that the adapter also requires the upstream `pi` binary.
+  {
+    id: "pi-acp",
+    label: "Pi",
+    spec: { command: "pi-acp" },
+    wraps: "pi",
+    install: { kind: "npm", package: "pi-acp" },
+    installHint:
+      "npm install -g @earendil-works/pi-coding-agent pi-acp",
+    homepage: "https://github.com/svkozak/pi-acp",
+  },
+  // MiniMax Code already exposes a native ACP server (`mcode acp`) but has
+  // not landed in the upstream ACP registry yet. Remove this overlay once the
+  // upstream id exists and has a compatible distribution entry.
+  {
+    id: "mcode",
+    label: "MiniMax Code",
+    spec: { command: "mcode", args: ["acp"] },
+    install: { kind: "npm", package: "@minimax-ai/code" },
+    installHint: "npm install -g @minimax-ai/code",
+    homepage: "https://github.com/MiniMax-AI/minimax-code",
+  },
   // hermes: NOT in official registry. Python-packaged; the official
   // installer downloads + sets up the global `hermes` binary. We ship a
   // full entry so it appears in install hints even though the registry
@@ -172,18 +227,10 @@ export const OMA_OVERLAY_AGENTS: KnownAgentEntry[] = [
     installHint: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
     homepage: "https://github.com/NousResearch/hermes-agent",
   },
-  // openclaw: NOT in official registry. The `openclaw` cli's `acp`
-  // subcommand exposes an ACP bridge that forwards to the OpenClaw
-  // Gateway. Distinct from `acpx` (an ACP CLIENT, same GH org).
-  {
-    id: "openclaw",
-    label: "OpenClaw",
-    spec: { command: "openclaw", args: ["acp"] },
-    featured: true,
-    installHint: "npm install -g openclaw",
-    homepage: "https://github.com/openclaw/openclaw",
-  },
 ];
+
+/** Products intentionally excluded even if a future upstream registry adds them. */
+export const REMOVED_ACP_AGENT_IDS: ReadonlySet<string> = new Set(["openclaw"]);
 
 /**
  * Sync resolver against the static overlay only. Suitable for browser
@@ -207,4 +254,3 @@ export function resolveOverlayAgent(id: string): KnownAgentEntry | null {
 // async registry.ts:loadRegistry / getKnownAgents / resolveKnownAgent.
 export { OMA_OVERLAY_AGENTS as KNOWN_ACP_AGENTS };
 export { resolveOverlayAgent as resolveKnownAgent };
-

@@ -30,6 +30,9 @@ export class CloudflareSandbox
   private sessionId: string;
   private mounted = false;
   private commandSecrets = new Map<string, Record<string, string>>();
+  private processEnv: Record<string, string> = {};
+  private outboundRequired = false;
+  private controlPlaneHostname: string | null = null;
 
   constructor(env: Env, sessionId: string) {
     this.env = env;
@@ -277,7 +280,12 @@ export class CloudflareSandbox
     // mountBucket below throws InvalidMountConfigError "already in use".
     // Idempotent unmount first; ignore errors (path wasn't mounted —
     // that's the happy case for a fresh isolate).
-    await sandbox.unmountBucket(mountPath).catch(() => {});
+    // `unmountBucket` is an optional SDK capability on local/fake sandbox
+    // implementations.  Mount cleanup is best-effort; absence must not turn
+    // a valid mount request into an opaque warning or fail a session warmup.
+    if (typeof sandbox.unmountBucket === "function") {
+      await sandbox.unmountBucket(mountPath).catch(() => {});
+    }
 
     if (fuse && bucketName) {
       await sandbox.mountBucket(bucketName, mountPath, {
@@ -315,9 +323,21 @@ export class CloudflareSandbox
    * Caller list:    GET /v1/sessions/:id/outputs   (R2 list_objects by prefix)
    * Caller fetch:   GET /v1/sessions/:id/outputs/:filename
    *
-   * Best-effort: any failure logs and proceeds (the agent can still
-   * write to /workspace as a fallback, just not callable-retrievable).
+   * Mount failures are surfaced to the Port caller. A managed-runtime caller
+   * that declares outputs must fail preparation rather than advertise a
+   * durable output path that is not actually connected.
    */
+  sessionOutputMountCapabilities(): {
+    durability: "durable" | "best_effort";
+  } | null {
+    if (!this.env.FILES_BUCKET) return null;
+    return {
+      durability: this.fuseR2ConfigOrNull() === null
+        ? "best_effort"
+        : "durable",
+    };
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;
@@ -336,12 +356,28 @@ export class CloudflareSandbox
     const fuse = this.fuseR2ConfigOrNull();
     const bucketName = "managed-agents-files";
 
+    // workerd's local Sandbox stub does not implement bucket mounts. Keep
+    // the filesystem contract testable without claiming durability: create
+    // the directory explicitly and advertise `best_effort` via the
+    // capability method above. Production (FUSE configured) never takes
+    // this branch and still fails hard when the mount primitive is absent.
+    if (!fuse && typeof sandbox.mountBucket !== "function") {
+      await sandbox.exec("mkdir -p /mnt/session/outputs", { timeout: 5000 });
+      console.warn(
+        "[sandbox] mountSessionOutputs: local dev stub has no bucket mount; " +
+        "created a non-durable /mnt/session/outputs directory",
+      );
+      return;
+    }
+
     // Defensive cleanup before mount — see mountMemoryStore for details.
     // Real prod symptom: container restart after sleepAfter teardown
     // throws InvalidMountConfigError "Mount path already in use" because
     // the SDK's per-isolate mount table still has the old entry. Caught
     // in sess-fa7j85x / sess-pkgiwl7 (2026-05-13 incident).
-    await sandbox.unmountBucket(mountPath).catch(() => {});
+    if (typeof sandbox.unmountBucket === "function") {
+      await sandbox.unmountBucket(mountPath).catch(() => {});
+    }
 
     try {
       if (fuse) {
@@ -370,8 +406,10 @@ export class CloudflareSandbox
       console.error(
         `[sandbox] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
       );
-      // Don't throw — agent can fall back to /workspace, just not
-      // callable-retrievable via the outputs endpoints.
+      // The Port caller decides whether this capability is required.
+      // Swallowing here made a failed mount indistinguishable from a durable
+      // attachment.
+      throw err;
     }
   }
 
@@ -395,10 +433,11 @@ export class CloudflareSandbox
     const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;
     const injectedSecrets = this.getSecretsForCommand(command);
+    const processEnv = this.processEnvironmentForCommand(command);
     try {
       const execPromise = sandbox.exec(command, {
         timeout: timeoutMs,
-        env: injectedSecrets,
+        env: processEnv,
       }).then((result: { stdout?: string; stderr?: string; exitCode?: number }) => {
         const out = result.stdout || "";
         const err = result.stderr || "";
@@ -422,7 +461,7 @@ export class CloudflareSandbox
     if (typeof sandbox.startProcess !== "function") return null;
     try {
       const proc = await sandbox.startProcess(command, {
-        env: this.getSecretsForCommand(command),
+        env: this.processEnvironmentForCommand(command),
       });
       if (!proc?.id) return null;
       return {
@@ -524,6 +563,7 @@ export class CloudflareSandbox
         {
           cwd: spec.cwd,
           env: {
+            ...this.processEnv,
             ...this.getSecretsForCommand(spec.command),
             ...spec.env,
           },
@@ -637,8 +677,11 @@ export class CloudflareSandbox
   }
 
   async setEnvVars(envVars: Record<string, string>): Promise<void> {
+    Object.assign(this.processEnv, envVars);
     const sandbox = await this.getSandbox();
-    await sandbox.setEnvVars(envVars);
+    if (typeof sandbox.setEnvVars === "function") {
+      await sandbox.setEnvVars(envVars);
+    }
   }
 
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {
@@ -650,32 +693,144 @@ export class CloudflareSandbox
    * session's identifying context (tenantId, sessionId). The handler runs
    * in the agent worker scope; on every outbound HTTPS request the
    * sandbox makes, it RPCs to main with these identifiers, main does the
-   * vault lookup live, injects the bearer, and forwards. The agent
-   * worker's address space never holds plaintext vault credentials —
-   * mirrors Anthropic Managed Agents' "credential proxy outside the
-   * harness" pattern (see apps/agent/src/oma-sandbox.ts file header).
+   * vault lookup live and returns the bearer to this trusted handler long
+   * enough to construct the upstream request. The untrusted container never
+   * receives it in memory, env, or checkpoints (see oma-sandbox.ts).
    */
   async setOutboundContext(opts: {
     tenantId: string;
+    environmentId?: string;
     sessionId: string;
+    workId?: string;
+    ownerId?: string;
+    generation?: number;
+    fenceToken?: string;
+    required?: boolean;
+    controlPlaneBaseUrl?: string;
   }): Promise<void> {
-    if (!opts.tenantId || !opts.sessionId) return;
+    if (!opts.tenantId || !opts.sessionId) {
+      throw new Error("Cloudflare outbound context requires tenantId and sessionId");
+    }
+    this.outboundRequired = opts.required === true;
+    if (this.outboundRequired && this.env.MAIN_MCP === undefined) {
+      throw new Error("Cloudflare required credential egress needs MAIN_MCP");
+    }
+    let controlPlane: URL | null = null;
+    if (opts.controlPlaneBaseUrl) {
+      try {
+        controlPlane = new URL(opts.controlPlaneBaseUrl);
+      } catch {
+        throw new Error("Cloudflare control-plane base URL is invalid");
+      }
+      if (controlPlane.protocol !== "https:" && controlPlane.protocol !== "http:") {
+        throw new Error("Cloudflare control-plane base URL must use HTTP(S)");
+      }
+    }
+    this.controlPlaneHostname = controlPlane?.hostname ?? null;
     try {
       const sandbox = await this.getSandbox();
       const hasFn = typeof sandbox.setOutboundHandler === "function";
       console.log(
         `[sandbox] setOutboundContext tenant=${opts.tenantId.slice(0, 8)} sid=${opts.sessionId.slice(0, 12)} hasFn=${hasFn}`,
       );
-      if (!hasFn) return;
+      if (!hasFn) {
+        if (this.outboundRequired) {
+          throw new Error("Cloudflare Sandbox does not expose setOutboundHandler");
+        }
+        return;
+      }
       await sandbox.setOutboundHandler("inject_vault_creds", {
         tenantId: opts.tenantId,
+        environmentId: opts.environmentId,
         sessionId: opts.sessionId,
+        workId: opts.workId,
+        ownerId: opts.ownerId,
+        generation: opts.generation,
+        fenceToken: opts.fenceToken,
+        required: this.outboundRequired,
       });
+      if (typeof sandbox.setOutboundByHost === "function") {
+        const context = {
+          tenantId: opts.tenantId,
+          environmentId: opts.environmentId,
+          sessionId: opts.sessionId,
+          workId: opts.workId,
+          ownerId: opts.ownerId,
+          generation: opts.generation,
+          fenceToken: opts.fenceToken,
+          required: this.outboundRequired,
+          controlPlaneOrigin: controlPlane?.origin,
+        };
+        const bindings = [
+          sandbox.setOutboundByHost("api.github.com", "github_auth", context),
+          sandbox.setOutboundByHost("github.com", "github_auth", context),
+        ];
+        if (controlPlane) {
+          bindings.push(sandbox.setOutboundByHost(
+            controlPlane.hostname,
+            "openma_control_plane",
+            context,
+          ));
+        }
+        await Promise.all(bindings);
+      } else if (controlPlane && this.outboundRequired) {
+        throw new Error("Cloudflare Sandbox does not expose setOutboundByHost");
+      }
       console.log(`[sandbox] setOutboundHandler bound (RPC mode)`);
     } catch (err) {
       console.error(
         `[sandbox] setOutboundContext failed: ${(err as Error).message ?? err}`,
       );
+      if (this.outboundRequired) throw err;
+    }
+  }
+
+  /** Replace the live credential handler before compute is retained/stopped.
+   * A stale container may still run briefly after lease loss, but every
+   * intercepted request is denied once this binding lands. */
+  async revokeOutboundContext(opts: {
+    workId: string;
+    generation: number;
+    reason: "completed" | "failed" | "lease_lost";
+  }): Promise<void> {
+    try {
+      const sandbox = await this.getSandbox();
+      if (typeof sandbox.setOutboundHandler !== "function") {
+        if (this.outboundRequired) {
+          throw new Error("Cloudflare Sandbox does not expose setOutboundHandler");
+        }
+        return;
+      }
+      await sandbox.setOutboundHandler("deny_outbound", {
+        workId: opts.workId,
+        generation: opts.generation,
+        reason: opts.reason,
+      });
+      if (typeof sandbox.setOutboundByHost === "function") {
+        const denied = {
+          workId: opts.workId,
+          generation: opts.generation,
+          reason: opts.reason,
+        };
+        const bindings = [
+          sandbox.setOutboundByHost("api.github.com", "deny_outbound", denied),
+          sandbox.setOutboundByHost("github.com", "deny_outbound", denied),
+        ];
+        if (this.controlPlaneHostname) {
+          bindings.push(sandbox.setOutboundByHost(
+            this.controlPlaneHostname,
+            "deny_outbound",
+            denied,
+          ));
+        }
+        await Promise.all(bindings);
+      }
+      this.controlPlaneHostname = null;
+    } catch (err) {
+      console.error(
+        `[sandbox] revokeOutboundContext failed work=${opts.workId.slice(0, 12)} generation=${opts.generation}: ${(err as Error).message ?? err}`,
+      );
+      if (this.outboundRequired) throw err;
     }
   }
 
@@ -815,6 +970,16 @@ export class CloudflareSandbox
       if (commandName === prefix) return secrets;
     }
     return undefined;
+  }
+
+  private processEnvironmentForCommand(
+    command: string,
+  ): Record<string, string> | undefined {
+    const secrets = this.getSecretsForCommand(command);
+    if (Object.keys(this.processEnv).length === 0 && secrets === undefined) {
+      return undefined;
+    }
+    return { ...this.processEnv, ...secrets };
   }
 
 

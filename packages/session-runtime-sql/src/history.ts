@@ -1,7 +1,7 @@
+import { decodeSessionEventDocument, type OrderedSessionEvent } from '@open-managed-agents/session-runtime-contract/history';
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type {
   SessionBootstrapEvent,
-  SessionEventView,
 } from "@open-managed-agents/domain/sessions";
 import type {
   LoadSessionRuntimeHistoryRecord,
@@ -9,8 +9,10 @@ import type {
   SessionRuntimeHistorySourcePort,
 } from "@open-managed-agents/session-runtime-contract/history";
 
-interface DocumentRow {
-  document: string;
+interface HistoryRow {
+  revision: number;
+  history_kind: 'initial' | 'event' | null;
+  document: string | null;
 }
 
 export class SqlSessionRuntimeHistorySource
@@ -21,43 +23,54 @@ export class SqlSessionRuntimeHistorySource
   async load(
     input: LoadSessionRuntimeHistoryRecord,
   ): Promise<SessionRuntimeHistoryRecord | null> {
-    const session = await this.client
+    // One SELECT binds every event and the native revision to the same
+    // database snapshot, including on READ COMMITTED SQL backends.
+    const rows = await this.client
       .prepare(
-        `SELECT 1 AS present
-           FROM managed_sessions
-          WHERE workspace_id = ? AND id = ?`,
+        `SELECT session.revision, history.history_kind, history.document
+           FROM managed_sessions AS session
+           LEFT JOIN (
+             SELECT workspace_id, session_id, 'initial' AS history_kind,
+                    document, sequence, NULL AS processed_at, NULL AS event_id
+               FROM managed_session_initial_events
+              WHERE workspace_id = ? AND session_id = ?
+             UNION ALL
+             SELECT workspace_id, session_id, 'event' AS history_kind,
+                    document, NULL AS sequence, processed_at, id AS event_id
+               FROM managed_session_events
+              WHERE workspace_id = ? AND session_id = ?
+           ) AS history ON history.workspace_id = session.workspace_id
+                       AND history.session_id = session.id
+          WHERE session.workspace_id = ? AND session.id = ?
+          ORDER BY history.history_kind ASC, history.sequence ASC,
+                   history.processed_at ASC, history.event_id ASC`,
       )
-      .bind(input.workspaceId, input.sessionId)
-      .first<{ present: number }>();
-    if (session === null) return null;
-
-    const [initialRows, eventRows] = await Promise.all([
-      this.client
-        .prepare(
-          `SELECT document
-             FROM managed_session_initial_events
-            WHERE workspace_id = ? AND session_id = ?
-            ORDER BY sequence ASC`,
-        )
-        .bind(input.workspaceId, input.sessionId)
-        .all<DocumentRow>(),
-      this.client
-        .prepare(
-          `SELECT document
-             FROM managed_session_events
-            WHERE workspace_id = ? AND session_id = ?
-            ORDER BY processed_at ASC, id ASC`,
-        )
-        .bind(input.workspaceId, input.sessionId)
-        .all<DocumentRow>(),
-    ]);
+      .bind(input.workspaceId, input.sessionId, input.workspaceId, input.sessionId, input.workspaceId, input.sessionId)
+      .all<HistoryRow>();
+    const session = rows.results?.[0];
+    if (!session) return null;
+    const initialRows = rows.results!.filter(row => row.history_kind === 'initial');
+    const eventRows = rows.results!.filter(row => row.history_kind === 'event');
+    const decoded = eventRows.map(row => decodeSessionEventDocument(row.document!));
+    const positions = new Set<string>();
+    const fullyOrdered = decoded.every(row => {
+      if (row.position === undefined) return false;
+      const key = `${row.position.revision}:${row.position.index}`;
+      if (positions.has(key)) return false;
+      positions.add(key);
+      return true;
+    });
+    const orderedEvents = fullyOrdered
+      ? (decoded as OrderedSessionEvent[]).slice().sort((left, right) =>
+          left.position.revision - right.position.revision || left.position.index - right.position.index)
+      : undefined;
     return {
-      initialEvents: (initialRows.results ?? []).map(
-        (row) => JSON.parse(row.document) as SessionBootstrapEvent,
+      revision: session.revision,
+      initialEvents: initialRows.map(
+        (row) => JSON.parse(row.document!) as SessionBootstrapEvent,
       ),
-      events: (eventRows.results ?? []).map(
-        (row) => JSON.parse(row.document) as SessionEventView,
-      ),
+      events: decoded.map(row => row.event),
+      ...(orderedEvents === undefined ? {} : { orderedEvents }),
     };
   }
 }

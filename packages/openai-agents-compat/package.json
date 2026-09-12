@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/openai-agents-compat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./projection": "./src/projection.ts" },
+  "scripts": { "test": "vitest run --config vitest.config.ts", "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "dependencies": {
+    "@openma/common": "github:openma-ai/openma-common#00358ff9c1e4a694171f5617a4715602c61433e7",
+    "@open-managed-agents/openai-agents-api": "workspace:*",
+    "@open-managed-agents/managed-agents-application": "workspace:*"
+  },
+  "devDependencies": { "openai": "7.15.0", "vitest": "^4.1.3" }
+}

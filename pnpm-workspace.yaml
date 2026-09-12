@@ -2,12 +2,19 @@ packages:
   - 'packages/*'
   - 'apps/main'
   - 'apps/main-node'
+  - 'apps/main-fly'
+  - 'apps/main-vercel'
   - 'apps/oma-vault'
   - 'apps/agent'
   - 'apps/console'
   - 'apps/integrations'
   - 'apps/docs'
   - 'apps/web'
+
+# Provider SDKs are optional peers of their isolated adapter packages. Keep the
+# default monorepo install provider-neutral; a deployment installs only the SDK
+# for the adapter it selects.
+autoInstallPeers: false
 
 # pnpm v11 reads ALL pnpm config from this file — `pnpm` block in
 # package.json is no longer honored. Keep peerDependencyRules + the
@@ -23,6 +30,9 @@ allowBuilds:
   '@anthropic-ai/tokenizer': true
   '@google/genai': false
   better-sqlite3: true
+  # Optional Modal SDK acceleration. Keep provider installation portable and
+  # prevent an adapter from gaining native install-script execution by default.
+  cbor-extract: false
   cpu-features: false
   esbuild: true
   msw: false

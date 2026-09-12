@@ -1,0 +1,29 @@
+{
+  "name": "@open-managed-agents/main-vercel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./api": "./api/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.120.0",
+    "@open-managed-agents/environment-dispatch-vercel": "workspace:*",
+    "@open-managed-agents/main-node": "workspace:*",
+    "@open-managed-agents/managed-runtime-host": "workspace:*",
+    "@open-managed-agents/vercel-sandbox-contract": "workspace:*",
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@types/node": "^26.5.0",
+    "@vercel/functions": "^3.0.0",
+    "@vercel/sandbox": "^3.2.1"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
+  }
+}

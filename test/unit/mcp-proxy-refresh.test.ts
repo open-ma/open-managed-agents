@@ -229,6 +229,78 @@ describe("forwardWithRefresh — OAuth refresh on 401", () => {
     expect((live!.auth as { refresh_token: string }).refresh_token).toBe("refresh_v2");
   });
 
+  it("refreshes and CAS-persists an official v1 managed Credential", async () => {
+    const { services } = makeServices();
+    let record = {
+      revision: 7,
+      credential: {
+        id: "vcrd_managed",
+        vaultId: VAULT,
+        archivedAt: null,
+        createdAt: "2026-09-10T00:00:00.000Z",
+        updatedAt: "2026-09-10T00:00:00.000Z",
+        auth: {
+          type: "mcp_oauth",
+          mcpServerUrl: SERVER,
+          accessToken: "expired-managed-token",
+          refresh: {
+            clientId: "managed-client",
+            refreshToken: "managed-refresh-v1",
+            tokenEndpoint: TOKEN_EP,
+            tokenEndpointAuth: { type: "none" },
+          },
+        },
+      },
+    };
+    const credentialSource = {
+      listByVaults: async () => [record],
+      find: async () => record,
+      replace: async (input) => {
+        expect(input.expectedRevision).toBe(7);
+        record = { revision: 8, credential: input.next };
+        return { type: "replaced", record };
+      },
+    };
+
+    mock.restore();
+    mock = installFetchMock([
+      () => new Response('{"error":"unauthorized"}', { status: 401 }),
+      () => new Response(JSON.stringify({
+        access_token: "fresh-managed-token",
+        refresh_token: "managed-refresh-v2",
+        expires_in: 3600,
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+      () => new Response('{"jsonrpc":"2.0","id":1,"result":{}}', { status: 200 }),
+    ]);
+
+    const response = await forwardWithRefresh(
+      services,
+      TENANT,
+      {
+        upstreamUrl: SERVER,
+        upstreamToken: "expired-managed-token",
+        refresh: {
+          refreshToken: "managed-refresh-v1",
+          tokenEndpoint: TOKEN_EP,
+          clientId: "managed-client",
+          credentialId: "vcrd_managed",
+          vaultId: VAULT,
+          credentialSource,
+        },
+      },
+      "POST",
+      new Headers({ "content-type": "application/json" }),
+      '{"jsonrpc":"2.0","id":1,"method":"initialize"}',
+    );
+
+    expect(response.status).toBe(200);
+    expect(mock.calls).toHaveLength(3);
+    expect(mock.calls[2].headers.get("authorization")).toBe("Bearer fresh-managed-token");
+    expect(record.revision).toBe(8);
+    expect(record.credential.auth.accessToken).toBe("fresh-managed-token");
+    expect(record.credential.auth.refresh.refreshToken).toBe("managed-refresh-v2");
+  });
+
   it("dedup: second 401 sees already-refreshed credential in D1, skips token_endpoint", async () => {
     const { services, credService } = makeServices();
     const cred = await seedCred(credService, "expired-token");

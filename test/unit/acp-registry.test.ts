@@ -23,11 +23,20 @@ describe("OMA_OVERLAY_AGENTS (browser-safe overlay over the official ACP registr
     expect(KNOWN_ACP_AGENTS).toBe(OMA_OVERLAY_AGENTS);
   });
 
-  it("includes the canonical ids OMA needs (claude-acp, codex-acp, gemini, opencode, hermes, openclaw)", () => {
+  it("includes the canonical ACP agents OMA supports", () => {
     const ids = new Set(OMA_OVERLAY_AGENTS.map((e) => e.id));
-    for (const id of ["claude-acp", "codex-acp", "gemini", "opencode", "hermes", "openclaw"]) {
+    for (const id of [
+      "claude-acp",
+      "codex-acp",
+      "gemini",
+      "opencode",
+      "pi-acp",
+      "mcode",
+      "hermes",
+    ]) {
       expect(ids.has(id), `missing overlay entry: ${id}`).toBe(true);
     }
+    expect(ids.has("openclaw")).toBe(false);
   });
 
   it("ids are unique slugs", () => {
@@ -100,6 +109,11 @@ describe("resolveKnownAgent (overlay-only sync resolver)", () => {
   it("resolves canonical ids to their entry", () => {
     expect(resolveKnownAgent("claude-acp")?.id).toBe("claude-acp");
     expect(resolveKnownAgent("opencode")?.id).toBe("opencode");
+    expect(resolveKnownAgent("pi-acp")?.id).toBe("pi-acp");
+    expect(resolveKnownAgent("mcode")?.spec).toEqual({
+      command: "mcode",
+      args: ["acp"],
+    });
     expect(resolveKnownAgent("hermes")?.id).toBe("hermes");
   });
 
@@ -115,4 +129,3 @@ describe("resolveKnownAgent (overlay-only sync resolver)", () => {
     expect(resolveKnownAgent("")).toBeNull();
   });
 });
-

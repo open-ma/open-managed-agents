@@ -5,20 +5,19 @@
 // — see apps/agent/src/runtime/session-do.ts for where that fires.
 //
 // Architectural property (mirrors Anthropic Managed Agents' "credential
-// proxy outside the harness" pattern): this handler runs in the agent
-// worker process, but it does NOT receive plaintext vault credentials in
-// its `ctx.params`. The only data passed in is `(tenantId, sessionId)` —
-// public identifiers that the model could already see. The actual
-// credential lookup and injection happen in main worker via the
-// `env.MAIN_MCP.outboundForward` WorkerEntrypoint RPC, where the vault
-// data already lives.
+// proxy outside the harness" pattern): this handler runs in the trusted
+// agent Worker, outside the untrusted container. Its durable binding contains
+// only the complete runtime scope + fence. A live lookup may return plaintext
+// to this trusted handler long enough to construct the upstream request, but
+// the credential is never placed in handler params, container memory, process
+// env, checkpoints, or logs.
 //
 // Pre-refactor we passed `vault_credentials` directly to setOutboundHandler;
 // CF Sandbox SDK then stashed them in container memory. A
 // container-escape or prompt-injection-driven RCE could read them out.
-// Post-refactor: the agent worker's address space never contains the
-// credentials at all. Container compromise can't exfiltrate what the
-// container's host process never loaded.
+// Post-refactor: container compromise cannot read the upstream credential.
+// Compromise of the trusted Worker/control plane remains in the threat model
+// and requires the platform's deployment isolation and secret controls.
 //
 // API reference: https://developers.cloudflare.com/changelog/post/2026-04-13-sandbox-outbound-workers-tls-auth/
 
@@ -61,9 +60,44 @@ interface SdkContext<P = unknown> {
   params: P;
 }
 
-interface OutboundContextParams {
+export interface OutboundContextParams {
   tenantId?: string;
+  environmentId?: string;
   sessionId?: string;
+  workId?: string;
+  ownerId?: string;
+  generation?: number;
+  fenceToken?: string;
+  required?: boolean;
+  /** Exact trusted API origin for the Work capability (scheme + host + port). */
+  controlPlaneOrigin?: string;
+}
+
+interface RuntimeFenceLookupClaim {
+  environmentId: string;
+  workId: string;
+  ownerId: string;
+  generation: number;
+  token: string;
+}
+
+function runtimeFenceClaim(params: OutboundContextParams): RuntimeFenceLookupClaim | null {
+  if (
+    typeof params.environmentId !== "string" || params.environmentId.length === 0
+    || typeof params.workId !== "string" || params.workId.length === 0
+    || typeof params.ownerId !== "string" || params.ownerId.length === 0
+    || !Number.isSafeInteger(params.generation) || (params.generation ?? 0) < 1
+    || typeof params.fenceToken !== "string" || params.fenceToken.length === 0
+  ) {
+    return null;
+  }
+  return {
+    environmentId: params.environmentId,
+    workId: params.workId,
+    ownerId: params.ownerId,
+    generation: params.generation!,
+    token: params.fenceToken,
+  };
 }
 
 /**
@@ -92,7 +126,14 @@ const HOP_BY_HOP_OR_CF_HEADERS = new Set([
   "host",
 ]);
 
-const injectVaultCredsHandler = async (
+const SANDBOX_CONTROL_HEADERS = [
+  "x-api-key",
+  "proxy-authorization",
+  "cookie",
+  "x-active-tenant",
+] as const;
+
+export const handleCredentialEgressRequest = async (
   request: Request,
   env: unknown,
   ctx: SdkContext<OutboundContextParams>,
@@ -106,6 +147,19 @@ const injectVaultCredsHandler = async (
   // local to the agent worker so transparent forwarding preserves all
   // HTTP semantics (HEAD Content-Length, SigV4 signed headers,
   // Transfer-Encoding: chunked, streaming, Trailer, etc).
+  const required = params.required === true;
+  const fence = runtimeFenceClaim(params);
+  if (required && (
+    !params.tenantId
+    || !params.sessionId
+    || fence === null
+    || e.MAIN_MCP === undefined
+  )) {
+    return new Response("credential egress denied: invalid runtime binding", {
+      status: 403,
+    });
+  }
+
   let cred: { type: "bearer"; token: string } | null = null;
   if (params.tenantId && params.sessionId && e.MAIN_MCP) {
     try {
@@ -113,14 +167,15 @@ const injectVaultCredsHandler = async (
         tenantId: params.tenantId,
         sessionId: params.sessionId,
         hostname: url.hostname,
+        ...(fence === null ? {} : { runtimeFence: fence }),
       });
     } catch (err) {
       console.error(
         `[oma-sandbox] lookupOutboundCredential threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
       );
-      // Fall through to passthrough — RPC failure shouldn't block
-      // legitimate outbound. The host either needs a credential (agent
-      // sees auth failure) or doesn't (passthrough is correct).
+      if (required) {
+        return new Response("credential egress unavailable", { status: 502 });
+      }
     }
   }
 
@@ -136,6 +191,11 @@ const injectVaultCredsHandler = async (
   //     known-length API, doesn't currently exist in Workers).
   const outHeaders = new Headers(request.headers);
   for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
+  for (const h of SANDBOX_CONTROL_HEADERS) outHeaders.delete(h);
+  // In enforced mode an agent cannot smuggle a credential around Vault by
+  // supplying its own Authorization value. Public destinations still pass,
+  // but without sandbox-owned bearer material.
+  if (required) outHeaders.delete("authorization");
   if (cred) {
     outHeaders.set("authorization", `Bearer ${cred.token}`);
   }
@@ -170,6 +230,104 @@ const injectVaultCredsHandler = async (
   return fetch(upstreamReq);
 };
 
+export const denyCredentialEgressRequest = async (
+  _request: Request,
+  _env: unknown,
+  _ctx: SdkContext<unknown>,
+): Promise<Response> => new Response("credential egress binding revoked", {
+  status: 403,
+});
+
+function isAllowedWorkCapabilityPath(
+  pathname: string,
+  params: OutboundContextParams,
+): boolean {
+  const parts = pathname.split("/").filter(Boolean).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return "";
+    }
+  });
+  if (
+    parts.length === 5
+    && parts[0] === "v1"
+    && parts[1] === "oma"
+    && parts[2] === "mcp-proxy"
+    && parts[3] === params.sessionId
+    && parts[4]!.length > 0
+  ) return true;
+  if (
+    parts.length >= 3
+    && parts[0] === "v1"
+    && parts[1] === "sessions"
+    && parts[2] === params.sessionId
+  ) return true;
+  if (
+    parts.length === 6
+    && parts[0] === "v1"
+    && parts[1] === "environments"
+    && parts[2] === params.environmentId
+    && parts[3] === "work"
+    && parts[4] === params.workId
+    && (parts[5] === "heartbeat" || parts[5] === "stop")
+  ) return true;
+  if (
+    parts[0] === "v1"
+    && parts[1] === "files"
+    && parts[2]?.length
+    && (parts.length === 3 || (parts.length === 4 && parts[3] === "content"))
+  ) return true;
+  return parts[0] === "v1"
+    && (parts[1] === "skills" || parts[1] === "memory_stores");
+}
+
+/**
+ * Explicit Layer-A exception for the current Work capability. The catch-all
+ * Vault handler strips sandbox Authorization, so managed Work traffic needs a
+ * narrower per-host handler. This function preserves only a sealed Work token,
+ * only to the exact configured OpenMA origin, and only for Work-authorized API
+ * families. The main API still decrypts the token and validates the live claim
+ * on every request.
+ */
+export const handleOpenmaControlPlaneRequest = async (
+  request: Request,
+  _env: unknown,
+  ctx: SdkContext<OutboundContextParams>,
+): Promise<Response> => {
+  const params = ctx.params ?? {};
+  let expectedOrigin: string;
+  try {
+    expectedOrigin = new URL(params.controlPlaneOrigin ?? "").origin;
+  } catch {
+    return new Response("control-plane egress denied: invalid binding", { status: 403 });
+  }
+  const url = new URL(request.url);
+  const authorization = request.headers.get("authorization") ?? "";
+  if (
+    url.origin !== expectedOrigin
+    || !authorization.startsWith("Bearer sk-ant-req-v1.")
+    || !isAllowedWorkCapabilityPath(url.pathname, params)
+  ) {
+    return new Response("control-plane egress denied", { status: 403 });
+  }
+
+  const headers = new Headers(request.headers);
+  for (const name of HOP_BY_HOP_OR_CF_HEADERS) headers.delete(name);
+  for (const name of SANDBOX_CONTROL_HEADERS) headers.delete(name);
+  const init: RequestInit = {
+    method: request.method,
+    headers,
+    redirect: "manual",
+  };
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    init.body = await request.arrayBuffer();
+  }
+  return fetch(new Request(request.url, init));
+};
+
+const injectVaultCredsHandler = handleCredentialEgressRequest;
+
 export class OmaSandbox extends Sandbox {
   // Required by sandbox-container PID 1: with interceptHttps=true, the
   // container's trustRuntimeCert() polls cloudflare-containers-ca.crt for
@@ -181,6 +339,11 @@ export class OmaSandbox extends Sandbox {
   // with "Certificate not found, refusing to start without HTTPS
   // interception enabled" 100% of the time.
   override interceptHttps = true;
+
+  // Every HTTP(S) request must traverse a registered handler. This blocks a
+  // compromised harness from bypassing Vault through a direct socket. R2 and
+  // other provider-owned exceptions remain explicit outboundByHost handlers.
+  override enableInternet = false;
 
   // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
   override sleepAfter = "5m";
@@ -514,6 +677,18 @@ const githubAuthHandler = async (
   const url = new URL(request.url);
   const params = ctx.params ?? {};
   const e = env as Env;
+  const required = params.required === true;
+  const fence = runtimeFenceClaim(params);
+  if (required && (
+    !params.tenantId
+    || !params.sessionId
+    || fence === null
+    || e.MAIN_MCP === undefined
+  )) {
+    return new Response("credential egress denied: invalid runtime binding", {
+      status: 403,
+    });
+  }
 
   let cred: { scheme: "Basic" | "Bearer"; token: string; slug: string } | null = null;
 
@@ -525,12 +700,15 @@ const githubAuthHandler = async (
         sessionId: params.sessionId,
         hostname: url.hostname,
         pathname: url.pathname,
+        ...(fence === null ? {} : { runtimeFence: fence }),
       });
     } catch (err) {
       console.error(
         `[oma-sandbox] lookupGithubCredential threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
       );
-      // Fall through to vault fallback below.
+      if (required) {
+        return new Response("credential egress unavailable", { status: 502 });
+      }
     }
   }
 
@@ -547,6 +725,7 @@ const githubAuthHandler = async (
         tenantId: params.tenantId,
         sessionId: params.sessionId,
         hostname: "api.github.com",
+        ...(fence === null ? {} : { runtimeFence: fence }),
       });
       if (fallback) {
         cred = {
@@ -559,12 +738,16 @@ const githubAuthHandler = async (
       console.error(
         `[oma-sandbox] cap fallback threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
       );
-      // Fall through unauthenticated.
+      if (required) {
+        return new Response("credential egress unavailable", { status: 502 });
+      }
     }
   }
 
   const outHeaders = new Headers(request.headers);
   for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
+  for (const h of SANDBOX_CONTROL_HEADERS) outHeaders.delete(h);
+  if (required) outHeaders.delete("authorization");
   if (cred) {
     const value = cred.scheme === "Basic"
       ? `Basic ${btoa(`x-access-token:${cred.token}`)}`
@@ -625,6 +808,8 @@ const githubAuthHandler = async (
 }).outboundHandlers = {
   inject_vault_creds: injectVaultCredsHandler,
   github_auth: githubAuthHandler,
+  openma_control_plane: handleOpenmaControlPlaneRequest,
+  deny_outbound: denyCredentialEgressRequest,
 };
 
 (OmaSandbox as unknown as {

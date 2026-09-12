@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { nanoid } from "nanoid";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import { parseCronExpression } from "cron-schedule";
 import {
   runAgentTurn,
@@ -41,6 +42,13 @@ import {
   RuntimeAdapterImpl,
   type RuntimeAdapter,
 } from "@open-managed-agents/session-runtime";
+import { SessionExecutionHost } from "@open-managed-agents/session-runtime";
+import {
+  ensureSessionExecutionCoordinatorSchema,
+  SqlSessionExecutionStore,
+} from "@open-managed-agents/session-runtime-sql/coordination";
+import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
+import { encodeRuntimeSessionEvent } from "@open-managed-agents/managed-agents-adapters-runtime";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import { isSpecEvent } from "@open-managed-agents/api-types";
@@ -61,6 +69,12 @@ import type {
   SystemUserMessageCancelledEvent,
 } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle, FileResolver } from "../harness/interface";
+import {
+  supportsManagedWorkspaceLifecycle,
+  supportsSessionOutputMount,
+  supportsWorkspaceBackup,
+  withSandboxExecutionGuard,
+} from "@open-managed-agents/sandbox";
 import { HarnessLease, resolveHarness } from "../harness/registry";
 import { composeSystemPrompt } from "../harness/platform-guidance";
 import {
@@ -84,14 +98,24 @@ import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { ensureSetupApplied } from "./setup-on-warmup";
-import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
+import {
+  resolveSkills,
+  resolveCustomSkills,
+  getSkillFiles,
+  getSkillFilesFromManagedSource,
+  mountSkillFiles,
+} from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createCfBrowserHarness } from "@open-managed-agents/browser-harness/cf";
 import type { BrowserHarness, BrowserBillingHook, BrowserSession } from "@open-managed-agents/browser-harness";
 import { SqliteHistory, InMemoryHistory } from "./history";
-import { createSandbox, CloudflareSandbox } from "./sandbox";
-import { mountResources } from "./resource-mounter";
-import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
+import { createSandbox } from "./sandbox";
+import {
+  loadManagedSessionResources,
+  mountResources,
+} from "./resource-mounter";
+import { createSandboxWarmupFailureEvent } from "./warmup-failure-event";
+import { prepareSandboxEgress } from "./sandbox-warmup-egress";
 import {
   findLatestBackup as findWorkspaceBackup,
 } from "./workspace-backups";
@@ -384,6 +408,22 @@ export class SessionDO extends DurableObject<Env> {
    */
   private _threadAbortControllers = new Map<string, AbortController>();
 
+  /** Execution authority lives in the tenant D1 outbox. The DO only owns a
+   * lease while running one lane and never uses this map as durable state. */
+  private _executionStore: SqlSessionExecutionStore | null = null;
+  private _executionStoreReady: Promise<void> | null = null;
+  private readonly _executionOwnerId = `cf-session:${nanoid()}`;
+  /**
+   * Ephemeral status mirror for a central execution lease.  The D1
+   * execution row is the authority; this set only lets the synchronous DO
+   * status endpoint report `running` while the host is awaiting a claim or
+   * executing a lease.  It is deliberately cleared in a finally block and
+   * is never consulted for recovery or fencing decisions.
+   */
+  private _executionActiveLanes = new Set<string>();
+  private _executionFences = new Map<string, SessionExecutionFence>();
+  private _executionParentLane = new Map<string, string>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this._ensureCfAgentsSchema();
@@ -567,6 +607,7 @@ export class SessionDO extends DurableObject<Env> {
    *  host migration). On mismatch we re-warm so restoreWorkspaceBackup
    *  runs and /workspace gets repopulated from the latest backup. */
   private currentWarmupGen: string | null = null;
+  private hasWritableManagedMemoryMount = false;
   /**
    * Per-turn dedup of `agent.message` broadcasts. Recovery's
    * `loadRecoveryContext` reads prior agent messages out of SQL so the
@@ -591,13 +632,6 @@ export class SessionDO extends DurableObject<Env> {
    * /destroy). Built lazily on first getBrowserHarness() call.
    */
   private browserHarness: BrowserHarness | null = null;
-  /**
-   * Localhost URLs of stdio MCP servers spawned in the sandbox during warmup.
-   * Indexed by mcp_servers[].name. Used to fix up the agent.mcp_servers entry
-   * before each buildTools() call so the official Streamable HTTP client
-   * talks to the right port.
-   */
-  private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
@@ -646,7 +680,10 @@ export class SessionDO extends DurableObject<Env> {
    * sub-agent's thread context, matching the existing `broadcast`
    * pattern in `runSubAgent`.
    */
-  private buildStreamRuntimeMethods(threadId?: string): {
+  private buildStreamRuntimeMethods(
+    threadId?: string,
+    executionFence?: SessionExecutionFence,
+  ): {
     broadcastStreamStart: (messageId: string) => Promise<void>;
     broadcastChunk: (messageId: string, delta: string) => Promise<void>;
     broadcastStreamEnd: (
@@ -663,22 +700,33 @@ export class SessionDO extends DurableObject<Env> {
   } {
     const tag = (event: SessionEvent): SessionEvent =>
       threadId ? ({ ...event, session_thread_id: threadId } as SessionEvent) : event;
+    const assertCurrentFence = () => {
+      if (executionFence !== undefined && !this.isExecutionFenceCurrent(executionFence)) {
+        const error = new Error("session execution fence is no longer valid");
+        error.name = "ExecutionFenceLostError";
+        throw error;
+      }
+    };
     const fire = (event: SessionEvent) => {
-      this.broadcastEvent(event);
+      assertCurrentFence();
+      this.broadcastEvent(event, executionFence);
       this.fanOutToHooks(event);
     };
     return {
       broadcastStreamStart: async (messageId: string) => {
+        assertCurrentFence();
         if (!this.streams) this.ensureSchema();
         await this.streams!.start(messageId, Date.now());
         fire(tag({ type: "agent.message_stream_start", message_id: messageId } as SessionEvent));
       },
       broadcastChunk: async (messageId: string, delta: string) => {
+        assertCurrentFence();
         if (!this.streams) this.ensureSchema();
         await this.streams!.appendChunk(messageId, delta);
         fire(tag({ type: "agent.message_chunk", message_id: messageId, delta } as SessionEvent));
       },
       broadcastStreamEnd: async (messageId: string, status, errorText?: string) => {
+        assertCurrentFence();
         if (!this.streams) this.ensureSchema();
         // Aborted streams need their partial text persisted as a
         // canonical agent.message before we lose access to the
@@ -702,10 +750,13 @@ export class SessionDO extends DurableObject<Env> {
           // Append directly to the events table — broadcastEvent's
           // dedup hits the broadcastedMessageIds set, but the persist
           // path is what matters most (Console replay, LLM context).
-          const history = new SqliteHistory(
-            this.ctx.storage.sql,
-            this.env.FILES_BUCKET ?? null,
-            `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+          const history = this.guardHistoryForExecution(
+            new SqliteHistory(
+              this.ctx.storage.sql,
+              this.env.FILES_BUCKET ?? null,
+              `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+            ),
+            executionFence,
           );
           history.append(partialEvent);
           this.broadcastedMessageIds.add(messageId);
@@ -838,9 +889,10 @@ export class SessionDO extends DurableObject<Env> {
     // in-flight queue state — acceptable for the small window.
     const threads = this.pending!.threadsWithPending();
     if (threads.length === 0) {
-      // Nothing pending anywhere; defensive primary drain (cheap, returns
-      // immediately when pending_events is empty).
-      await this.drainEventQueue("sthr_primary");
+      // Nothing pending anywhere. Do not invoke drainEventQueue just to
+      // discover an empty queue: the central execution path arms a lease
+      // heartbeat when it enters, which would leak a 30s alarm for an idle
+      // session (and makes alarm() look like it has live work).
       return;
     }
     await Promise.all(threads.map((t) => this.drainEventQueue(t)));
@@ -1122,6 +1174,162 @@ export class SessionDO extends DurableObject<Env> {
    * appended between turn start and turn-end status_idle (5 messages
    * sent during a long-running turn would all be skipped).
    */
+  private async getExecutionStore(): Promise<SqlSessionExecutionStore | null> {
+    const db = (this.env as unknown as { MAIN_DB?: D1Database }).MAIN_DB;
+    if (!db || !this.state.tenant_id || !this.state.session_id) return null;
+    if (this._executionStore === null) {
+      this._executionStore = new SqlSessionExecutionStore(new CfD1SqlClient(db));
+      this._executionStoreReady = ensureSessionExecutionCoordinatorSchema(
+        new CfD1SqlClient(db),
+      );
+    }
+    await this._executionStoreReady;
+    return this._executionStore;
+  }
+
+  private executionFenceForEvent(event: SessionEvent): SessionExecutionFence | undefined {
+    let lane = (event as unknown as { session_thread_id?: string }).session_thread_id
+      ?? "sthr_primary";
+    for (let depth = 0; depth < 8; depth += 1) {
+      const fence = this._executionFences.get(lane);
+      if (fence !== undefined) return fence;
+      const parent = this._executionParentLane.get(lane);
+      if (parent === undefined) break;
+      lane = parent;
+    }
+    return undefined;
+  }
+
+  /** Local pending rows are a UI projection. Make delivery retries idempotent
+   * by keying them on the canonical managed event id. */
+  private pendingRowForEvent(eventId: string): PendingRow | null {
+    if (!eventId) return null;
+    for (const row of this.ctx.storage.sql.exec(
+      `SELECT pending_seq, enqueued_at, session_thread_id, type, event_id, data, cancelled_at
+         FROM pending_events WHERE event_id = ? AND cancelled_at IS NULL
+         ORDER BY pending_seq ASC LIMIT 1`,
+      eventId,
+    )) {
+      return {
+        pending_seq: row.pending_seq as number,
+        enqueued_at: row.enqueued_at as number,
+        session_thread_id: row.session_thread_id as string,
+        type: row.type as string,
+        event_id: row.event_id as string,
+        data: row.data as string,
+        cancelled_at: (row.cancelled_at as number | null) ?? null,
+      };
+    }
+    return null;
+  }
+
+  private localEventExists(eventId: string): boolean {
+    if (!eventId) return false;
+    for (const row of this.ctx.storage.sql.exec(
+      `SELECT 1 AS present FROM events
+        WHERE json_extract(data, '$.id') = ? LIMIT 1`,
+      eventId,
+    )) {
+      return row.present === 1;
+    }
+    return false;
+  }
+
+  private enqueuePendingIfNew(event: SessionEvent): boolean {
+    const eventId = (event as unknown as { id?: string }).id ?? "";
+    if (this.localEventExists(eventId)) return false;
+    this.pending!.enqueue(event);
+    return true;
+  }
+
+  private executionInputFromWire(event: SessionEvent): unknown {
+    const camelize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(camelize);
+      if (typeof value !== "object" || value === null) return value;
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [
+          key.replace(/_([a-z])/gu, (_match, letter: string) => letter.toUpperCase()),
+          camelize(child),
+        ]),
+      );
+    };
+    return camelize(event);
+  }
+
+  private async admitPendingFallback(
+    store: SqlSessionExecutionStore,
+    threadId: string,
+  ): Promise<boolean> {
+    const row = this.pending!.peek(threadId);
+    if (row === null) return false;
+    let event: SessionEvent;
+    try {
+      event = JSON.parse(row.data) as SessionEvent;
+    } catch {
+      this.pending!.delete(row.pending_seq);
+      return false;
+    }
+    const id = (event as unknown as { id?: string }).id ?? row.event_id;
+    const admitted = await store.admit({
+      execution: {
+        id,
+        workspaceId: this.state.tenant_id!,
+        sessionId: this.state.session_id!,
+        laneId: threadId,
+        admittedAt:
+          (event as unknown as { processed_at?: string }).processed_at ??
+          new Date().toISOString(),
+        events: [this.executionInputFromWire(event) as never],
+      },
+    });
+    if (admitted.type === "conflict") {
+      throw new Error(`Session Execution ${id} conflicts with an existing admission`);
+    }
+    return true;
+  }
+
+  private ensureLocalPending(event: SessionEvent): PendingRow | null {
+    if (
+      event.type !== "user.message" &&
+      event.type !== "user.tool_confirmation" &&
+      event.type !== "user.custom_tool_result"
+    ) return null;
+    const eventId = (event as unknown as { id?: string }).id ?? "";
+    if (this.localEventExists(eventId)) return null;
+    const existing = this.pendingRowForEvent(eventId);
+    if (existing !== null) return existing;
+    this._stampEventForPending(event);
+    this.pending!.enqueue(event);
+    return this.pendingRowForEvent(eventId);
+  }
+
+  private promotePendingRow(
+    row: PendingRow,
+    history: HistoryStore,
+  ): void {
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const event = JSON.parse(row.data) as SessionEvent;
+    event.processed_at = nowIso;
+    let promoted = false;
+    for (const existing of this.ctx.storage.sql.exec(
+      `SELECT 1 AS present FROM events WHERE json_extract(data, '$.id') = ? LIMIT 1`,
+      row.event_id,
+    )) {
+      promoted = existing.present === 1;
+    }
+    if (!promoted) history.append(event);
+    this.pending!.delete(row.pending_seq);
+    this.broadcastEvent(event);
+    this.broadcastEvent({
+      type: "system.user_message_promoted",
+      event_id: row.event_id,
+      pending_seq: row.pending_seq,
+      processed_at: nowIso,
+      session_thread_id: row.session_thread_id,
+    } as SystemUserMessagePromotedEvent);
+  }
+
   private async drainEventQueue(threadId: string = "sthr_primary"): Promise<void> {
     // Sync re-entry mutex per thread — two callers for the same thread
     // can't both reach the SQL pending lookup before either marks a
@@ -1132,6 +1340,13 @@ export class SessionDO extends DurableObject<Env> {
 
     try {
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
+
+    // New path: execution admission is the tenant-D1 outbox. Resolve this
+    // before touching the legacy DO-local events queue: a central execution
+    // host must not reinterpret old rows while a concurrent interrupt is
+    // trying to cancel them (that race used to turn `processed_at` on before
+    // the interrupt could fence the input).
+    const executionStore = await this.getExecutionStore();
 
     // Legacy backfill (one-shot per drain): pre-3a3e7ec sessions had
     // user.* rows sitting in `events` with processed_at IS NULL. The
@@ -1144,7 +1359,7 @@ export class SessionDO extends DurableObject<Env> {
     // in-flight queue state. Cheap (indexed; zero rows in steady state).
     // TODO(dual-table-followup): remove this block after a soak window
     // confirms no production session has had this trigger.
-    {
+    if (executionStore === null) {
       const cursor = this.ctx.storage.sql.exec(
         `SELECT seq, data FROM events
            WHERE session_thread_id = ?
@@ -1181,6 +1396,116 @@ export class SessionDO extends DurableObject<Env> {
           session_thread_id: threadId,
         } as SystemUserMessagePromotedEvent);
       }
+    }
+
+    // New path: execution admission is the tenant-D1 outbox. The old local
+    // pending loop below remains a bounded migration fallback for sessions
+    // created before the outbox migration (and for self-host fixtures that
+    // intentionally do not bind MAIN_DB). It is never used by a migrated
+    // Cloudflare deployment.
+    if (executionStore !== null) {
+      const host = new SessionExecutionHost({
+        store: executionStore,
+        scope: {
+          workspaceId: this.state.tenant_id!,
+          sessionId: this.state.session_id!,
+          laneId: threadId,
+        },
+        ownerId: this._executionOwnerId,
+        clock: { now: () => new Date() },
+        ids: { nextAttemptId: () => `attempt_${nanoid()}` },
+        leaseTtlMs: KEEP_ALIVE_INTERVAL_MS * 3,
+        heartbeatIntervalMs: KEEP_ALIVE_INTERVAL_MS,
+        onFenceChanged: (fence) => this._executionFences.set(threadId, fence),
+      });
+      this._executionActiveLanes.add(threadId);
+      // Keep-alive is a host concern, not a lease authority.  The durable
+      // execution row remains valid if this alarm is dropped; a replacement
+      // DO can reclaim it after expiry.
+      void this.ctx.storage
+        .setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS)
+        .catch(() => {});
+      try {
+      while (true) {
+        this.broadcastedMessageIds.clear();
+        const result = await host.runOne(async (execution, fence, signal) => {
+          this._executionFences.set(threadId, fence);
+          const executionHistory = this.guardHistoryForExecution(history, fence);
+          try {
+            for (const rawEvent of execution.events) {
+              if (rawEvent.type === "system.message") continue;
+              // Execution rows use the Managed Agents domain shape. The DO
+              // runtime uses the legacy wire shape, so this is the one
+              // explicit protocol projection at the host boundary.
+              const event = encodeRuntimeSessionEvent(rawEvent as never) as SessionEvent;
+              const localPending = this.ensureLocalPending(event);
+              if (localPending !== null) this.promotePendingRow(localPending, executionHistory);
+              if (event.type === "user.message") {
+                await this.processUserMessage(event as UserMessageEvent, 0, false, signal, fence);
+              } else if (event.type === "user.tool_confirmation") {
+                await this.handleToolConfirmation(event as UserToolConfirmationEvent, executionHistory, signal, fence);
+              } else if (event.type === "user.custom_tool_result") {
+                const customResult = event as UserCustomToolResultEvent;
+                const toolResultEvent: SessionEvent = {
+                  type: "agent.tool_result",
+                  tool_use_id: customResult.custom_tool_use_id,
+                  content: (customResult.content ?? [])
+                    .map((b) => b.type === "text" ? b.text : "").join(""),
+                  parent_event_id: customResult.custom_tool_use_id,
+                };
+                executionHistory.append(toolResultEvent);
+                this.broadcastEvent(toolResultEvent, fence);
+                await this.processUserMessage({
+                  type: "user.message",
+                  content: [{ type: "text", text: "" }],
+                }, 0, true, signal, fence);
+              }
+            }
+            // `broadcastEvent` deliberately serializes the managed-runtime
+            // projection in a promise chain.  Drain that chain while this
+            // lease is still active; otherwise the host could settle the
+            // execution first and every fenced projection would correctly
+            // be rejected as stale.  This is the commit barrier between the
+            // harness side effects and execution settlement.
+            await this._managedProjectionChain;
+          } finally {
+            const currentFence = this._executionFences.get(threadId);
+            if (
+              currentFence?.executionId === fence.executionId &&
+              currentFence.attemptId === fence.attemptId
+            ) {
+              this._executionFences.delete(threadId);
+            }
+          }
+        });
+        if (result.type === "empty") {
+          // Direct DO callers and pre-outbox deliveries may have a local
+          // pending row but no D1 admission yet. Admit it once as a
+          // reconciliation step; normal main-worker traffic already has the
+          // atomic D1 outbox row and takes the claim path directly.
+          if (await this.admitPendingFallback(executionStore, threadId)) continue;
+          break;
+        }
+        if (result.type === "completed") continue;
+        if (result.type === "cancelled") break;
+        if (result.type === "failed") {
+          const errorEvent: SessionEvent = {
+            type: "session.error",
+            error: result.error.message,
+          };
+          history.append(errorEvent);
+          this.broadcastEvent(errorEvent);
+        } else {
+          // A stale incarnation may still have emitted live chunks, but it
+          // cannot commit a terminal event. The next alarm/request reclaims.
+          console.warn(`[drain] execution ${result.execution.id} lost its lease`);
+        }
+        break;
+      }
+      } finally {
+        this._executionActiveLanes.delete(threadId);
+      }
+      return;
     }
 
     while (true) {
@@ -1630,7 +1955,7 @@ export class SessionDO extends DurableObject<Env> {
       // on OmaSandbox.snapshotWorkspaceNow (single source of truth, also
       // used by the sleepAfter onActivityExpired hook). Best-effort: any
       // failure logs and we proceed with destroy.
-      if (this.sandbox?.snapshotWorkspaceNow) {
+      if (supportsManagedWorkspaceLifecycle(this.sandbox)) {
         try { await this.sandbox.snapshotWorkspaceNow(); } catch {}
       }
       // Emit sandbox_active_seconds BEFORE destroy. CF's onStop callback
@@ -1772,16 +2097,18 @@ export class SessionDO extends DurableObject<Env> {
         // enqueue. The pending row carries the same JSON; drain will
         // overwrite processed_at to the wall-clock when promoting.
         this._stampEventForPending(um);
-        this.pending!.enqueue(um);
+        const enqueued = this.enqueuePendingIfNew(um);
         // Broadcast the AMA-spec "pending" notification so live
         // consumers can render the outbox bubble immediately. Carries
         // pending_seq so the matching `system.user_message_promoted`
         // frame can correlate the bubble with the eventual events-log
         // row at drain time.
-        this._broadcastPendingFrame(um, umThread);
-        try {
-          await this.schedule(5, "recoverEventQueue");
-        } catch {}
+        if (enqueued) this._broadcastPendingFrame(um, umThread);
+        if (enqueued) {
+          try {
+            await this.schedule(5, "recoverEventQueue");
+          } catch {}
+        }
         // Fire-and-forget the drain. ctx.waitUntil is a no-op inside DO classes
         // (Workers Context API is stateless-only — see CF docs), so don't try
         // to use it. The DO is kept alive instead by:
@@ -1795,7 +2122,7 @@ export class SessionDO extends DurableObject<Env> {
         // The 5s recoverEventQueue schedule above is the safety-net
         // re-trigger if this background promise dies before drain runs.
         console.log(`[post /event] user.message enqueued (thread=${umThread}), firing drainEventQueue`);
-        this.drainEventQueue(umThread);
+        if (enqueued) this.drainEventQueue(umThread);
         return new Response(null, { status: 202 });
       }
 
@@ -1816,6 +2143,19 @@ export class SessionDO extends DurableObject<Env> {
             .session_thread_id ?? "sthr_primary";
         const ctrl = this._threadAbortControllers.get(targetThread);
         const hadActiveTurn = !!ctrl;
+        // The execution store is the durable interrupt authority. The local
+        // AbortController is only a latency optimization for this DO
+        // incarnation; a replacement host observes the same request through
+        // its next renew/claim and cannot resurrect the cancelled generation.
+        const executionStore = await this.getExecutionStore();
+        if (executionStore !== null && this.state.tenant_id && this.state.session_id) {
+          await executionStore.requestInterrupt({
+            workspaceId: this.state.tenant_id,
+            sessionId: this.state.session_id,
+            laneId: targetThread,
+            requestedAt: new Date().toISOString(),
+          });
+        }
         if (ctrl) {
           ctrl.abort();
           this._threadAbortControllers.delete(targetThread);
@@ -1841,14 +2181,21 @@ export class SessionDO extends DurableObject<Env> {
         // rows sitting in `events` with processed_at IS NULL. The legacy
         // partial pending-index on `events` would otherwise pick them up
         // on the next drain. Mark them cancelled so they never run.
-        const cancelResult = this.ctx.storage.sql.exec(
+        this.ctx.storage.sql.exec(
           `UPDATE events SET cancelled_at = ?
              WHERE session_thread_id = ?
                AND processed_at IS NULL AND cancelled_at IS NULL
                AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
           cancelTs, targetThread,
         );
-        const legacyCancelledCount = (cancelResult as { rowsWritten?: number }).rowsWritten ?? 0;
+        // Workerd's SqlStorage cursor does not expose rowsWritten reliably
+        // (unlike the old cf-agents shim).  Read SQLite's changes() value so
+        // a legacy queue flush also drives the interrupt idle decision and
+        // remains correct on every runtime.
+        const legacyCancelledCount = Number(
+          this.ctx.storage.sql.exec("SELECT changes() AS affected_rows").one()
+            .affected_rows ?? 0,
+        );
         const cancelledCount = cancelledRows.length + legacyCancelledCount;
         history.append(body as UserInterruptEvent);
         // Emit status_idle when interrupt actually changed thread state:
@@ -1882,13 +2229,15 @@ export class SessionDO extends DurableObject<Env> {
           (tc as unknown as { session_thread_id?: string }).session_thread_id ??
           "sthr_primary";
         this._stampEventForPending(tc);
-        this.pending!.enqueue(tc);
-        this._broadcastPendingFrame(tc, tcThread);
-        try {
-          await this.schedule(5, "recoverEventQueue");
-        } catch {}
+        const enqueued = this.enqueuePendingIfNew(tc);
+        if (enqueued) this._broadcastPendingFrame(tc, tcThread);
+        if (enqueued) {
+          try {
+            await this.schedule(5, "recoverEventQueue");
+          } catch {}
+        }
         console.log("[post /event] tool_confirmation enqueued, firing drainEventQueue (no await)");
-        this.drainEventQueue(tcThread);
+        if (enqueued) this.drainEventQueue(tcThread);
         return new Response(null, { status: 202 });
       }
 
@@ -1898,13 +2247,15 @@ export class SessionDO extends DurableObject<Env> {
           (customResult as unknown as { session_thread_id?: string })
             .session_thread_id ?? "sthr_primary";
         this._stampEventForPending(customResult);
-        this.pending!.enqueue(customResult);
-        this._broadcastPendingFrame(customResult, ctrThread);
-        try {
-          await this.schedule(5, "recoverEventQueue");
-        } catch {}
+        const enqueued = this.enqueuePendingIfNew(customResult);
+        if (enqueued) this._broadcastPendingFrame(customResult, ctrThread);
+        if (enqueued) {
+          try {
+            await this.schedule(5, "recoverEventQueue");
+          } catch {}
+        }
         console.log("[post /event] custom_tool_result enqueued, firing drainEventQueue (no await)");
-        this.drainEventQueue(ctrThread);
+        if (enqueued) this.drainEventQueue(ctrThread);
         return new Response(null, { status: 202 });
       }
 
@@ -2612,6 +2963,80 @@ export class SessionDO extends DurableObject<Env> {
     return this.wrappedSandbox!;
   }
 
+  /**
+   * Bind provider/container calls to the currently claimed execution.
+   *
+   * SessionDO owns the durable lease, while the sandbox package enforces the
+   * local call boundary. The map is refreshed by SessionExecutionHost on each
+   * renewal, so an idle-but-still-running turn sees the extended expiry. A
+   * child harness shares its parent's lane and therefore passes the same
+   * fence through this helper instead of acquiring a second authority.
+   */
+  private bindSandboxToExecution(
+    sandbox: SandboxExecutor,
+    signal: AbortSignal | undefined,
+    fence: SessionExecutionFence | undefined,
+    laneId: string,
+  ): SandboxExecutor {
+    if (signal === undefined && fence === undefined) return sandbox;
+    const executionId = fence?.executionId;
+    const attemptId = fence?.attemptId;
+    return withSandboxExecutionGuard(sandbox, {
+      signal,
+      isValid: fence
+        ? () => {
+            const current = this._executionFences.get(laneId);
+            if (current === undefined) return false;
+            if (
+              current.executionId !== executionId ||
+              current.attemptId !== attemptId
+            ) {
+              return false;
+            }
+            return Date.parse(current.expiresAt) > Date.now();
+          }
+        : undefined,
+    });
+  }
+
+  private isExecutionFenceCurrent(fence: SessionExecutionFence): boolean {
+    for (const current of this._executionFences.values()) {
+      if (
+        current.executionId === fence.executionId &&
+        current.attemptId === fence.attemptId &&
+        current.generation === fence.generation
+      ) {
+        return Date.parse(current.expiresAt) > Date.now();
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Make the DO-local event log obey the same fence as the managed projection.
+   * The durable execution row remains the authority, but a stale incarnation
+   * must not append a local canonical event before its fenced projection is
+   * rejected. Legacy callers without a fence retain the old history object.
+   */
+  private guardHistoryForExecution(
+    history: HistoryStore,
+    fence: SessionExecutionFence | undefined,
+  ): HistoryStore {
+    if (fence === undefined) return history;
+    return {
+      getMessages: () => history.getMessages(),
+      getEvents: (afterSeq?: number) => history.getEvents(afterSeq),
+      append: (event: SessionEvent) => {
+        if (!this.isExecutionFenceCurrent(fence)) {
+          const error = new Error("session execution fence is no longer valid");
+          error.name = "ExecutionFenceLostError";
+          throw error;
+        }
+        history.append(event);
+      },
+    };
+  }
+
   /** Used inside warmup itself to avoid the wrap → warmup → wrap recursion. */
   private getRawSandbox(): SandboxExecutor {
     this.ensureSandboxCreated();
@@ -2629,11 +3054,10 @@ export class SessionDO extends DurableObject<Env> {
 
   /**
    * Returns a Proxy of the sandbox where any "real-work" method (exec,
-   * readFile, etc.) awaits sandboxWarmupPromise before delegating. Lets us
-   * remove the blocking `await warmUpSandbox()` from the user-message hot
-   * path: turns that never touch the sandbox (e.g. cron-only flows, pure
-   * answer turns) skip the 3s container cold-start entirely; turns that do
-   * use tools overlap the warmup with model fetch/TTFT.
+   * readFile, etc.) awaits sandboxWarmupPromise before delegating. The main
+   * turn also awaits warmup before tool/harness construction; this proxy is
+   * the second safety barrier for confirmation callbacks, background work,
+   * and container recycle between calls.
    *
    * Container-recycle detection: CF Sandbox container has its own idle
    * lifecycle independent of SessionDO. If it dies (sleepAfter, OOM, host
@@ -2697,6 +3121,7 @@ export class SessionDO extends DurableObject<Env> {
       );
       this.sandboxWarmupPromise = null;
       this.currentWarmupGen = null;
+      this.hasWritableManagedMemoryMount = false;
       await this.warmUpSandbox();
     };
     return new Proxy(raw, {
@@ -2786,49 +3211,6 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Spawn any stdio-mode MCP servers declared on the session's agent config.
-   * Idempotent — if the spawned URL is already recorded for a server name,
-   * we skip. Records each spawned server's localhost URL on this.spawnedMcpUrls
-   * so applyMcpUrlFixups can patch agent.mcp_servers before buildTools.
-   */
-  private async spawnSessionStdioMcps(sandbox: SandboxExecutor): Promise<void> {
-    const agentId = this.state.agent_id;
-    if (!agentId || !this.env.CONFIG_KV) return;
-    const agent = await this.getAgentConfig(agentId);
-    if (!agent) return;
-    const mcps = agent.mcp_servers || [];
-    const stdios: StdioMcpConfig[] = [];
-    for (const s of mcps) {
-      if (!s.stdio) continue;
-      if (this.spawnedMcpUrls.has(s.name)) continue;
-      stdios.push({ name: s.name, ...s.stdio });
-    }
-    if (stdios.length === 0) return;
-    try {
-      const spawned = await spawnStdioMcpServers(sandbox, stdios);
-      for (const sp of spawned) this.spawnedMcpUrls.set(sp.name, sp.url);
-    } catch (err) {
-      // Best-effort: log but don't fail the whole warmup.
-      console.error("[mcp-spawner]", err);
-    }
-  }
-
-  /**
-   * Mutate agent.mcp_servers in place so any stdio entry has its `url` set
-   * to the localhost URL we spawned it on. No-op if no spawned URLs are
-   * recorded yet (warmup hasn't run, or no stdio MCPs configured).
-   */
-  private applyMcpUrlFixups(agent: AgentConfig): AgentConfig {
-    if (this.spawnedMcpUrls.size === 0) return agent;
-    if (!agent.mcp_servers) return agent;
-    const patched = agent.mcp_servers.map((s) => {
-      const url = this.spawnedMcpUrls.get(s.name);
-      return url ? { ...s, url } : s;
-    });
-    return { ...agent, mcp_servers: patched };
-  }
-
-  /**
    * Pre-warm the sandbox: run a no-op command to trigger container startup,
    * then install environment packages if configured.
    * Returns a promise that resolves when warmup is complete.
@@ -2906,6 +3288,17 @@ export class SessionDO extends DurableObject<Env> {
         throw new Error(`Sandbox container failed to start after 10 attempts. Last error: ${lastError}`);
       }
 
+      // Network egress is a warmup prerequisite, not a post-mount concern.
+      // Cloudflare sandboxes run with direct internet disabled; this installs
+      // the TLS interception handler and the GitHub host routes before package
+      // installation or repository materialization makes its first request.
+      if (this.state.session_id && this.state.tenant_id) {
+        await prepareSandboxEgress(sandbox, {
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+        });
+      }
+
       // Restore the most recent workspace backup for (tenant, environment)
       // BEFORE mountResources runs, so the agent picks up where it left
       // off. Per CF's recommended pattern (changelog 2026-02-23, "pick up
@@ -2917,7 +3310,7 @@ export class SessionDO extends DurableObject<Env> {
       // explicitly asked for a clone so they want clone semantics, not
       // restore semantics. (Future: smarter merge — restore then `git pull`.)
       if (
-        sandbox instanceof CloudflareSandbox &&
+        supportsWorkspaceBackup(sandbox) &&
         this.state.tenant_id &&
         this.state.environment_id &&
         this.env.MAIN_DB
@@ -3028,6 +3421,25 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
+      // A writable Memory workspace must be private to one concrete sandbox
+      // incarnation. Reuse the marker when this DO reconnects to a live
+      // container; mint it only after workspace restore has decided whether
+      // the container is fresh, otherwise the marker would incorrectly make
+      // the first warmup look retained.
+      if (this.currentWarmupGen === null) {
+        try {
+          const probed = await sandbox.exec("cat /tmp/.oma-warm 2>/dev/null");
+          const match = /^exit=(-?\d+)\n([\s\S]*)$/.exec(probed);
+          const retained = match?.[1] === "0" ? match[2].trim() : "";
+          if (retained.length > 0) this.currentWarmupGen = retained;
+        } catch { /* fresh container */ }
+      }
+      if (this.currentWarmupGen === null) {
+        const generation = crypto.randomUUID().slice(0, 12);
+        await sandbox.exec(`echo ${generation} > /tmp/.oma-warm`);
+        this.currentWarmupGen = generation;
+      }
+
       // image_strategy fast path REMOVED. Was a base_snapshot lazy-prepare
       // path that ran a multi-minute install + tar + R2 upload via a single
       // sandbox.exec — the SDK wraps each exec in blockConcurrencyWhile,
@@ -3042,6 +3454,7 @@ export class SessionDO extends DurableObject<Env> {
       // httpx/pandas/pytest/Go/Rust pre-baked, so envs without extra
       // packages skip install entirely.
       const envId = this.state.environment_id;
+      const environmentConfig = envId ? await this.getEnvConfig(envId) : null;
       const imagePathHandled = false;
 
       // Install environment packages if configured. Replaces the old
@@ -3054,8 +3467,7 @@ export class SessionDO extends DurableObject<Env> {
       // On the next cold restart the "restored" path skips them and only
       // re-runs apt (which can't be backed up via SDK whitelist).
       if (envId && !imagePathHandled) {
-        const envConfig = await this.getEnvConfig(envId);
-        const pkgs = envConfig?.config?.packages;
+        const pkgs = environmentConfig?.config?.packages;
         if (pkgs) {
           const result = await ensureSetupApplied(
             { exec: (cmd: string, timeout?: number) => sandbox.exec(cmd, timeout) },
@@ -3073,10 +3485,9 @@ export class SessionDO extends DurableObject<Env> {
             },
           );
           if (result.error) {
-            console.error(`[setup-on-warmup] failed path=${result.path}: ${result.error}`);
-            // Don't throw — the agent can still try to run with whatever
-            // packages survived. Surfaced via tool exec failure if a
-            // missing dep is needed.
+            throw new Error(
+              `Environment setup failed at ${result.path}: ${result.error}`,
+            );
           }
         }
       }
@@ -3085,73 +3496,59 @@ export class SessionDO extends DurableObject<Env> {
       // writes there immediately appears via the caller-facing
       // GET /v1/sessions/:id/outputs endpoint. Mirrors AMA's `/mnt/session
       // /outputs/` magic dir contract — agent uses the standard `write` tool,
-      // platform takes care of persistence + listing. Best-effort: mount
-      // failure logs but doesn't block warmup; agent can still write to
-      // /workspace, just not callable-retrievable.
-      if (this.state.session_id && this.state.tenant_id && sandbox.mountSessionOutputs) {
-        try {
-          await sandbox.mountSessionOutputs({
-            tenantId: this.state.tenant_id,
-            sessionId: this.state.session_id,
-          });
-        } catch (err) {
-          console.warn(
-            `[session-do] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
+      // platform takes care of persistence + listing. When FILES_BUCKET is
+      // configured this is required: a failed mount aborts warmup so the
+      // session never falsely advertises durable, caller-visible outputs.
+      if (this.state.session_id && this.state.tenant_id) {
+        if (!supportsSessionOutputMount(sandbox)) {
+          throw new Error(
+            "Session outputs are enabled but the sandbox has no output mount capability",
           );
         }
+        await sandbox.mountSessionOutputs({
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+        });
+        if (sandbox.setEnvVars === undefined) {
+          throw new Error(
+            "Session outputs are mounted but the sandbox cannot publish their environment contract",
+          );
+        }
+        await sandbox.setEnvVars({ OMA_OUTPUTS_DIR: "/mnt/session/outputs" });
       }
 
-      // Spawn stdio MCP servers in the sandbox if the agent uses any. The
-      // spawned process binds on 127.0.0.1 + records the URL so subsequent
-      // buildTools calls point the official MCP HTTP adapter at it.
-      await this.spawnSessionStdioMcps(sandbox);
-
-      // Mount all session resources (files, git repos, env secrets)
+      // Materialize the current canonical Managed Session resources. The
+      // main worker owns the Session/source Ports; this execution worker only
+      // consumes a service-binding projection and performs provider I/O.
+      // Resolve on every warmup so files added after Session creation are
+      // visible before the first model request.
       const sessionId = this.state.session_id;
       if (sessionId) {
-        // Sessions-store reads via the session_id PRIMARY KEY index, no
-        // tenant prefix needed — fixes the staging-kv namespace mismatch
-        // the legacy CONFIG_KV.list path tripped over.
-        const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
-        const rows = await services.sessions.listResourcesBySession({ sessionId });
-        const resources: Array<Record<string, unknown>> = [];
-        const secretStore = new Map<string, string>();
-
-        for (const row of rows) {
-          resources.push(row.resource as unknown as Record<string, unknown>);
-          // Secret payloads (env_secret.value, github_repository.token) live
-          // in the per-session secret store, keyed by (tenant, session, resource).
-          const secretData = await services.sessionSecrets.get({
-            tenantId: this.state.tenant_id,
-            sessionId,
-            resourceId: row.id,
-          });
-          if (secretData) secretStore.set(row.id, secretData);
+        const source = this.env.MAIN_MCP;
+        if (source === undefined) {
+          throw new Error(
+            "Managed Session input source service binding is unavailable",
+          );
         }
+        const loaded = await loadManagedSessionResources(source, {
+          tenantId: this.state.tenant_id,
+          sessionId,
+          runtimeGeneration: this.currentWarmupGen,
+        });
+        this.hasWritableManagedMemoryMount = loaded.resources.some((resource) =>
+          resource.type === "memory_store" && resource.access !== "read_only"
+        );
 
-        if (resources.length) {
+        if (loaded.resources.length) {
           await mountResources(
             sandbox,
-            resources,
+            loaded.resources,
             this.env.CONFIG_KV,
-            secretStore,
-            this.env.FILES_BUCKET,
+            new Map(),
+            undefined,
             this.state.tenant_id,
-            // Memory-store name lookup for mount paths (Anthropic mounts as
-            // /mnt/memory/<name>/, not /mnt/memory/<id>/). The lookup falls
-            // back to the id if the store can't be resolved.
-            async (storeId: string) => {
-              try {
-                const memSvc = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
-                const store = await memSvc.getStore({
-                  tenantId: this.state.tenant_id,
-                  storeId,
-                });
-                return store ? { name: store.name } : null;
-              } catch {
-                return null;
-              }
-            },
+            undefined,
+            loaded.fileSource,
           );
         }
       }
@@ -3192,67 +3589,17 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Bind the outbound handler with this session's identifying context.
-      // Per-call vault lookup happens in main via env.MAIN_MCP.lookupOutboundCredential
-      // — the agent worker briefly holds the bearer token to inject the
-      // Authorization header. Container never sees plaintext (auth is
-      // added on agent worker side; SDK's TLS-MITM re-encrypts to
-      // container). The handler is a transparent HTTP proxy: body
-      // streams through, response is returned unchanged.
-      //
-      // **MUST call this for every session, vault or not.** Cloudflare's
-      // sandbox-container PID 1 runs trustRuntimeCert() at startup which
-      // polls /etc/cloudflare/certs/cloudflare-containers-ca.crt for 5s.
-      // The cert is only pushed by the platform once `setOutboundHandler`
-      // has been called from the worker side. Skipping this call for
-      // no-vault sessions made every such container exit(1) at the 5s
-      // mark with "Certificate not found, refusing to start without
-      // HTTPS interception enabled" — see cf-sandbox-cert-demo bisection
-      // 2026-05-04. The handler itself is a no-op transparent proxy when
-      // no vault credentials match the request host (oma-sandbox.ts:82-97).
-      //
-      // R2 traffic (createBackup / restoreBackup squashfs PUT/GET/HEAD)
-      // is routed away from this catch-all by the static `outboundByHost`
-      // entry in oma-sandbox.ts — without that bypass the materialize-and-
-      // re-PUT flow corrupts the squashfs blob (sandbox-sdk#619).
-      if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id) {
-        await sandbox.setOutboundContext({
-          tenantId: this.state.tenant_id,
-          sessionId: this.state.session_id,
-        });
-      }
-
-      // Per-host github handler binding. Without this, the static
-      // `outboundByHost` map only carries the function reference — CF
-      // Containers SDK invokes it with `ctx.params = undefined`, so
-      // githubAuthHandler's `if (params.tenantId && ...)` guard always
-      // fails, MAIN_MCP credential lookups never fire, and gh / git
-      // requests sail past unauthenticated. setOutboundByHost binds the
-      // params for this specific (host, methodName) pair at runtime.
-      // Wrapped in optional check because older sandbox SDK versions
-      // don't expose this method (self-host running 0.8.x). On those,
-      // github cap_cli still won't work, but neither did it before.
-      const sandboxHost = sandbox as unknown as {
-        setOutboundByHost?: (
-          hostname: string,
-          methodName: string,
-          params: { tenantId: string; sessionId: string },
-        ) => Promise<void>;
-      };
-      if (sandboxHost.setOutboundByHost && this.state.session_id && this.state.tenant_id) {
-        const ctx = { tenantId: this.state.tenant_id, sessionId: this.state.session_id };
-        await Promise.all([
-          sandboxHost.setOutboundByHost("api.github.com", "github_auth", ctx),
-          sandboxHost.setOutboundByHost("github.com", "github_auth", ctx),
-        ]);
-      }
-
       // Hand backup context to OmaSandbox so its onActivityExpired hook
       // (sleepAfter teardown) writes the final /workspace snapshot scoped
       // to this (tenant, env, session). Container DO is keyed by sessionId,
       // so this only needs to land once per warmup. Restoration on the
       // next session uses (tenant, env) — see findWorkspaceBackup above.
-      if (sandbox.setBackupContext && this.state.session_id && this.state.tenant_id && this.state.environment_id) {
+      if (
+        supportsManagedWorkspaceLifecycle(sandbox)
+        && this.state.session_id
+        && this.state.tenant_id
+        && this.state.environment_id
+      ) {
         await sandbox.setBackupContext({
           tenantId: this.state.tenant_id,
           environmentId: this.state.environment_id,
@@ -3280,32 +3627,92 @@ export class SessionDO extends DurableObject<Env> {
         });
       }
 
-      // Drop a per-warmup marker so the proxy can detect a recycled
-      // container later (just check `cat /tmp/.oma-warm` matches the
-      // gen we set). /tmp clears on restart so the absence IS the signal.
-      const gen = crypto.randomUUID().slice(0, 12);
-      try {
-        await sandbox.exec(`echo ${gen} > /tmp/.oma-warm`);
-        this.currentWarmupGen = gen;
-      } catch (err) {
-        logWarn(
-          { op: "session_do.warmup.write_marker", session_id: this.state.session_id, err },
-          "warmup marker write failed; proxy will pessimistically re-warm",
-        );
-        this.currentWarmupGen = null;
-      }
     } catch (err) {
       this.currentWarmupGen = null;
+      this.hasWritableManagedMemoryMount = false;
+      console.error(
+        `[warmup] failed session=${this.state.session_id ?? "unknown"}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
-      this.broadcastEvent({
-        type: "agent.message",
-        content: [{ type: "text", text: `Sandbox warmup failed: ${err instanceof Error ? err.message : String(err)}` }],
-      });
+      this.broadcastEvent(createSandboxWarmupFailureEvent(err));
       throw err;
     }
   }
 
-  private broadcastEvent(event: SessionEvent) {
+  /** Commit writable canonical Memory mounts before the public idle boundary.
+   * The main worker revalidates the durable execution fence before every CAS
+   * mutation, so a stale SessionDO may keep running briefly but cannot publish
+   * its filesystem view after ownership moves. */
+  private async synchronizeManagedMemoryStores(
+    executionFence: SessionExecutionFence | undefined,
+  ): Promise<void> {
+    const binding = this.env.MAIN_MCP;
+    const tenantId = this.state.tenant_id;
+    const sessionId = this.state.session_id;
+    const runtimeGeneration = this.currentWarmupGen;
+    if (
+      !this.hasWritableManagedMemoryMount
+      || binding === undefined
+      || executionFence === undefined
+      || tenantId.length === 0
+      || sessionId.length === 0
+      || runtimeGeneration === null
+    ) return;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = await binding.synchronizeManagedMemorySnapshots({
+          tenantId,
+          sessionId,
+          runtimeGeneration,
+          executionFence,
+        });
+        if (result.type === "fence_lost") {
+          const error = new Error("Managed Memory synchronization lost its execution fence");
+          error.name = "ExecutionFenceLostError";
+          throw error;
+        }
+        if (result.type === "not_found") {
+          throw new Error(`Managed Session ${sessionId} was not found during Memory synchronization`);
+        }
+        if (result.conflicts.length > 0 || result.recoveredWipes.length > 0) {
+          logWarn(
+            {
+              op: "session_do.memory_sync.rebased",
+              session_id: sessionId,
+              conflicts: result.conflicts,
+              recovered_wipes: result.recoveredWipes,
+            },
+            "canonical Memory won one or more workspace reconciliation conflicts",
+          );
+        }
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.name === "ExecutionFenceLostError") {
+          throw error;
+        }
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Managed Memory synchronization failed: ${String(lastError)}`);
+  }
+
+  private broadcastEvent(
+    event: SessionEvent,
+    explicitFence?: SessionExecutionFence,
+  ) {
+    const executionFence = explicitFence ?? this.executionFenceForEvent(event);
+    if (
+      executionFence !== undefined &&
+      !this.isExecutionFenceCurrent(executionFence)
+    ) {
+      return;
+    }
     const data = JSON.stringify(event);
     // Per-socket spec-vs-extension routing. Sockets that opted into chunks
     // (tagged "chunks" in the /ws handler) receive everything; others
@@ -3322,10 +3729,13 @@ export class SessionDO extends DurableObject<Env> {
         // Connection already closed
       }
     }
-    this.projectManagedRuntimeEvent(event);
+    this.projectManagedRuntimeEvent(event, executionFence);
   }
 
-  private projectManagedRuntimeEvent(event: SessionEvent): void {
+  private projectManagedRuntimeEvent(
+    event: SessionEvent,
+    executionFence?: SessionExecutionFence,
+  ): void {
     const binding = this.env.MAIN_MCP;
     const workspaceId = this._state?.tenant_id;
     const sessionId = this._state?.session_id;
@@ -3337,6 +3747,7 @@ export class SessionDO extends DurableObject<Env> {
           workspaceId,
           sessionId,
           event: eventDocument,
+          ...(executionFence !== undefined && { executionFence }),
         });
         if (result.type === "version_conflict") {
           throw new Error("managed session projection revision conflict");
@@ -3477,14 +3888,24 @@ export class SessionDO extends DurableObject<Env> {
    * `runtime.broadcast` already does both — this is the equivalent for tool
    * code that doesn't receive a runtime context.
    */
-  private persistAndBroadcastEvent(event: SessionEvent) {
+  private persistAndBroadcastEvent(
+    event: SessionEvent,
+    laneId?: string,
+    executionFence?: SessionExecutionFence,
+  ) {
+    const fence = executionFence ?? (laneId ? this._executionFences.get(laneId) : undefined);
+    if (fence !== undefined && !this.isExecutionFenceCurrent(fence)) {
+      // The harness is stale. SandboxExecutionGuard will stop provider calls;
+      // this check closes the local event-log side of the same boundary.
+      return;
+    }
     try {
       const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       history.append(event);
     } catch (err) {
       console.warn(`[persistAndBroadcastEvent] history.append failed: ${(err as Error).message}`);
     }
-    this.broadcastEvent(event);
+    this.broadcastEvent(event, fence);
     this.fanOutToHooks(event);
   }
 
@@ -3578,6 +3999,7 @@ export class SessionDO extends DurableObject<Env> {
   private async resolveAuxModel(agent: AgentConfig): Promise<{
     model: LanguageModel;
     modelInfo: { model_id: string };
+    providerOptions?: SharedV3ProviderOptions;
   } | null> {
     if (!agent.aux_model) return null;
     const handle = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
@@ -3589,9 +4011,23 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      providerOptions:
+        typeof agent.aux_model !== "string" &&
+        agent.aux_model.provider_options?.pi &&
+        typeof agent.aux_model.provider_options.pi === "object" &&
+        !Array.isArray(agent.aux_model.provider_options.pi)
+          ? agent.aux_model.provider_options.pi as Record<string, unknown>
+          : undefined,
       speed: typeof agent.aux_model === "string" ? undefined : agent.aux_model.speed,
     }));
-    return { model, modelInfo: { model_id: handle } };
+    return {
+      model,
+      modelInfo: { model_id: handle },
+      ...(typeof agent.aux_model !== "string" &&
+        agent.aux_model.provider_options !== undefined && {
+          providerOptions: agent.aux_model.provider_options as SharedV3ProviderOptions,
+        }),
+    };
   }
 
   /**
@@ -3600,12 +4036,19 @@ export class SessionDO extends DurableObject<Env> {
    */
   private async handleToolConfirmation(
     confirmation: UserToolConfirmationEvent,
-    history: HistoryStore
+    history: HistoryStore,
+    parentSignal?: AbortSignal,
+    executionFence?: SessionExecutionFence,
   ): Promise<void> {
     // Wrapped sandbox: per-method warmup happens inside any actual call.
     // Confirmation handlers may not even touch the sandbox depending on
     // tool type, so eager warmup is wasted; lazy is the right default.
-    const sandbox = this.getOrCreateSandbox();
+    const sandbox = this.bindSandboxToExecution(
+      this.getOrCreateSandbox(),
+      parentSignal,
+      executionFence,
+      (confirmation as unknown as { session_thread_id?: string }).session_thread_id ?? "sthr_primary",
+    );
     void this.warmUpSandbox().catch(() => { /* surfaces via tool exec */ });
 
     // Retrieve the pending tool call from session metadata
@@ -3628,9 +4071,13 @@ export class SessionDO extends DurableObject<Env> {
           }
         }
 
+        // Tool definitions must reflect the fully prepared runtime. Resource
+        // mount failures must stop the confirmation continuation.
+        await this.warmUpSandbox();
+
         // Build tools with execute functions intact (not stripped for always_ask)
         const auxResolved = await this.resolveAuxModel(agent);
-        const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
+        const allTools = await buildTools(agent, sandbox, {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
@@ -3642,7 +4089,12 @@ export class SessionDO extends DurableObject<Env> {
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
-          broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
+          auxProviderOptions: auxResolved?.providerOptions,
+          broadcastEvent: (event) => this.persistAndBroadcastEvent(
+            event,
+            (confirmation as unknown as { session_thread_id?: string }).session_thread_id ?? "sthr_primary",
+            executionFence,
+          ),
           scheduleWakeup: (a) => this.scheduleWakeup(a),
           cancelWakeup: (id) => this.cancelWakeup(id),
           listWakeups: () => this.listWakeups(),
@@ -3707,7 +4159,7 @@ export class SessionDO extends DurableObject<Env> {
       type: "user.message",
       content: [{ type: "text", text: "" }],
     };
-    await this.processUserMessage(resumeMsg, 0, true);
+    await this.processUserMessage(resumeMsg, 0, true, parentSignal, executionFence);
   }
 
   /**
@@ -3923,12 +4375,18 @@ export class SessionDO extends DurableObject<Env> {
     parentHistory: HistoryStore,
     sandbox: SandboxExecutor,
     parentThreadId: string = "sthr_primary",
+    parentSignal?: AbortSignal,
   ): Promise<string> {
     // Generate a unique thread ID. Prefix `sthr_` matches AMA spec
     // (BetaManagedAgentsSessionThread.id is `sthr_*`); previous prefix
     // was `thread_*` and pre-existing live sessions may still hold those
     // in their in-memory Map — both work but new threads land on `sthr_`.
     const threadId = `sthr_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    // Runtime events emitted by this child must inherit the parent's
+    // execution fence. The child is a logical lane, not a second execution
+    // owner; walking this map lets projection writes remain fenced even when
+    // the child event carries its own session_thread_id.
+    this._executionParentLane.set(threadId, parentThreadId);
 
     // Reserved id "general" → opt-in built-in delegation tool. Uses a
     // synthesized config: parent's model + a generic system prompt + a
@@ -4042,20 +4500,43 @@ export class SessionDO extends DurableObject<Env> {
       harness = resolveHarness(resolvedHarnessName);
     }
 
+    // Bind the child to both its parent lease and its own interrupt slot.
+    // The sandbox instance is shared for filesystem continuity, but this
+    // guard makes a child-targeted interrupt stop provider calls made by the
+    // child without affecting sibling lanes.
+    const abortController = new AbortController();
+    this._threadAbortControllers.set(threadId, abortController);
+    const abortFromParent = () => abortController.abort(parentSignal?.reason);
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+    const childSandbox = withSandboxExecutionGuard(sandbox, {
+      signal: abortController.signal,
+    });
+
     // Build sub-agent tools and model (platform prepares context for sub-agent too)
+    let childSignal: AbortSignal | undefined = abortController.signal;
+    const subEnvironment = this.state.environment_id
+      ? await this.getEnvConfig(this.state.environment_id)
+      : null;
     const subAuxResolved = await this.resolveAuxModel(subAgent);
-    const subTools = await buildTools(this.applyMcpUrlFixups(subAgent), sandbox, {
+    const subTools = await buildTools(subAgent, childSandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
       toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
+      environmentConfig: subEnvironment?.config,
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
       sessionId: this.state.session_id,
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
-      broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
+      auxProviderOptions: subAuxResolved?.providerOptions,
+      broadcastEvent: (event) => this.persistAndBroadcastEvent(
+        event,
+        parentThreadId,
+        this._executionFences.get(parentThreadId),
+      ),
       // Subagents do NOT get the schedule tool. onScheduledWakeup is a
       // SessionDO-level callback with no per-thread routing — a wakeup
       // injected by a subagent lands in the parent session's main event
@@ -4069,7 +4550,7 @@ export class SessionDO extends DurableObject<Env> {
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
         // Nested delegate: this sub-agent's threadId becomes the new
         // child's parent. Lineage chain matches what Console renders.
-        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
+        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, childSandbox, threadId, childSignal);
       },
     });
     const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
@@ -4082,20 +4563,17 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: subCreds.baseURL,
       customHeaders: subCreds.customHeaders,
       piConfig: subCreds.piConfig,
+      providerOptions:
+        typeof subAgent.model !== "string" &&
+        subAgent.model.provider_options?.pi &&
+        typeof subAgent.model.provider_options.pi === "object" &&
+        !Array.isArray(subAgent.model.provider_options.pi)
+          ? subAgent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
       thinkingLevel: typeof subAgent.model === "string" ? undefined : subAgent.model.effort,
       speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
     });
     const subModel = toAiSdkLanguageModel(subPiRuntime);
-
-    // Per-thread abort controller. Registered in _threadAbortControllers
-    // so a `user.interrupt` with this thread's session_thread_id (handled
-    // by the POST /event branch above) aborts exactly this sub-agent's
-    // in-flight turn without touching siblings or the primary thread.
-    // Cleared in finally with the same identity guard processUserMessage
-    // uses — so a re-entrant runSubAgent on the same threadId (rare; nested
-    // delegate) doesn't drop the inner controller's slot.
-    const abortController = new AbortController();
-    this._threadAbortControllers.set(threadId, abortController);
 
     // Build sub-agent context: own history, shared sandbox, parent event log
     const subCtx: HarnessContext = {
@@ -4137,12 +4615,12 @@ export class SessionDO extends DurableObject<Env> {
         delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
           // Nested delegate inside the env block; see runtime block
           // above for the same lineage rule.
-          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
+          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, childSandbox, threadId, childSignal);
         },
       },
       runtime: {
         history: subHistory,
-        sandbox,
+        sandbox: childSandbox,
         broadcast: (event) => {
           subHistory.append(event);
           const taggedEvent = { ...event, session_thread_id: threadId };
@@ -4151,7 +4629,10 @@ export class SessionDO extends DurableObject<Env> {
           this.fanOutToHooks(taggedEvent);
           this.maybeCreditCacheTokens(threadId, taggedEvent);
         },
-        ...this.buildStreamRuntimeMethods(threadId),
+        ...this.buildStreamRuntimeMethods(
+          threadId,
+          this._executionFences.get(parentThreadId),
+        ),
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.creditUsageToThread(threadId, { input_tokens, output_tokens });
         },
@@ -4190,12 +4671,20 @@ export class SessionDO extends DurableObject<Env> {
       if (this._threadAbortControllers.get(threadId) === abortController) {
         this._threadAbortControllers.delete(threadId);
       }
+      parentSignal?.removeEventListener("abort", abortFromParent);
+      try {
+        const threadIdleEvent: SessionEvent = {
+          type: "session.thread_idle",
+          session_thread_id: threadId,
+        };
+        parentHistory.append(threadIdleEvent);
+        this.broadcastEvent(threadIdleEvent);
+      } catch {
+        // A lost parent fence deliberately rejects this terminal marker.
+      } finally {
+        this._executionParentLane.delete(threadId);
+      }
     }
-
-    // Emit thread_idle
-    const threadIdleEvent: SessionEvent = { type: "session.thread_idle", session_thread_id: threadId };
-    parentHistory.append(threadIdleEvent);
-    this.broadcastEvent(threadIdleEvent);
 
     return responseText || "(sub-agent produced no text output)";
   }
@@ -4210,7 +4699,9 @@ export class SessionDO extends DurableObject<Env> {
   private async processUserMessage(
     userMessage: UserMessageEvent,
     retryCount: number = 0,
-    skipAppend: boolean = false
+    skipAppend: boolean = false,
+    parentSignal?: AbortSignal,
+    executionFence?: SessionExecutionFence,
   ): Promise<void> {
     // Resolved up front so closures built below (delegateToAgent in
     // env / runtime blocks) can capture it. Defaults to primary —
@@ -4222,10 +4713,14 @@ export class SessionDO extends DurableObject<Env> {
 
     const agentId = this.state.agent_id;
     if (!agentId) return;
+    const activeFence = executionFence ?? this._executionFences.get(turnThreadId);
 
     const agent = await this.getAgentConfig(agentId);
     if (!agent) {
-      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
+      const history = this.guardHistoryForExecution(
+        new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`),
+        activeFence,
+      );
       const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
       history.append(errorEvent);
       this.broadcastEvent(errorEvent);
@@ -4233,7 +4728,10 @@ export class SessionDO extends DurableObject<Env> {
       return;
     }
 
-    const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
+    const history = this.guardHistoryForExecution(
+      new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`),
+      activeFence,
+    );
 
     // Status-pair invariant: every status_running emit (line ~3889
     // below) MUST be followed by exactly one status_idle emit before
@@ -4244,6 +4742,7 @@ export class SessionDO extends DurableObject<Env> {
     // polling). Tracked via this flag — finally emits if no earlier
     // path did.
     let idleEmitted = false;
+    let managedMemorySynchronized = false;
     // A successful turn knows its precise stop reason before tool disposal,
     // but `status_idle` is the externally visible lifecycle boundary. Hold
     // the event until every turn-scoped tool (including remote MCP sessions)
@@ -4252,17 +4751,21 @@ export class SessionDO extends DurableObject<Env> {
     let completedIdleEvent: SessionEvent | undefined;
 
     // Reuse session-level sandbox (singleton) — files persist across turns.
-    // Returned object is a lazy proxy: the underlying container is warmed up
-    // on first method call, in parallel with model fetch / TTFT. Cron-only
-    // turns or pure-answer turns skip the cold-start entirely. Errors from
-    // warmup will surface from the first sandbox tool's execute().
-    const sandbox = this.getOrCreateSandbox();
+    // Returned object is a lazy proxy. Warmup starts concurrently with the
+    // control-plane reads below, then is awaited before tools/harness are
+    // built so declared resources are present on the first model request.
+    let sandbox = this.bindSandboxToExecution(
+      this.getOrCreateSandbox(),
+      parentSignal,
+      activeFence,
+      turnThreadId,
+    );
 
     // Kick off warmup so it overlaps with the rest of pre-streamText setup
-    // and the first model fetch. Result is cached on sandboxWarmupPromise,
-    // so the proxy's per-method `await this.warmUpSandbox()` becomes free
-    // once this resolves. Catch detached so the unhandled-rejection logger
-    // doesn't yell — the per-method await re-throws to the caller.
+    // Result is cached on sandboxWarmupPromise and awaited below before any
+    // tool or model can observe the runtime. Catch detached here only avoids
+    // an unhandled rejection during the overlap window; the later await
+    // propagates the same error into the turn lifecycle.
     void this.warmUpSandbox().catch(() => { /* surfaces via tool exec */ });
 
     // Fetch environment config for networking restrictions
@@ -4304,6 +4807,12 @@ export class SessionDO extends DurableObject<Env> {
     }
     const memoryStoreIds = memoryAttachments.map((a) => a.store_id);
 
+    // Warmup may overlap the preceding control-plane reads, but it must
+    // finish before harness/tool construction. This closes the first-turn
+    // race where files, repositories or skills were absent from the model's
+    // initial capability snapshot and only appeared on a later sandbox call.
+    await this.warmUpSandbox();
+
     // Resolve harness via registry — SessionDO never imports a concrete harness
     let harness: HarnessInterface;
     let resolvedHarnessName = agent.harness || "default";
@@ -4326,9 +4835,25 @@ export class SessionDO extends DurableObject<Env> {
 
     // --- Platform prepares WHAT is available ---
 
+    // Create the local abort controller before building tools. Preparation
+    // itself can perform sandbox writes (for example MCP startup), so bind
+    // those calls to the same parent execution fence as the model loop.
+    const abortController = new AbortController();
+    this._threadAbortControllers.set(turnThreadId, abortController);
+    const abortFromParent = () => abortController.abort(parentSignal?.reason);
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+    const effectiveAbortSignal = abortController.signal;
+    sandbox = this.bindSandboxToExecution(
+      sandbox,
+      effectiveAbortSignal,
+      activeFence,
+      turnThreadId,
+    );
+
     // Build tools from agent config
     const auxResolved = await this.resolveAuxModel(agent);
-    const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
+    const allTools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
@@ -4340,7 +4865,8 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
-      broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
+      auxProviderOptions: auxResolved?.providerOptions,
+      broadcastEvent: (event) => this.persistAndBroadcastEvent(event, turnThreadId, activeFence),
       scheduleWakeup: (a) => this.scheduleWakeup(a),
       cancelWakeup: (id) => this.cancelWakeup(id),
       listWakeups: () => this.listWakeups(),
@@ -4348,7 +4874,7 @@ export class SessionDO extends DurableObject<Env> {
         // turnThreadId is captured from the enclosing processUserMessage
         // scope (declared at the top of the function) — closure evals
         // lazily at harness.run time, so TDZ isn't a concern.
-        return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
+        return this.runSubAgent(agentId, message, history, sandbox, turnThreadId, effectiveAbortSignal);
       },
       watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
         this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -4378,6 +4904,13 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      providerOptions:
+        typeof agent.model !== "string" &&
+        agent.model.provider_options?.pi &&
+        typeof agent.model.provider_options.pi === "object" &&
+        !Array.isArray(agent.model.provider_options.pi)
+          ? agent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
       thinkingLevel: typeof agent.model === "string" ? undefined : agent.model.effort,
       speed: typeof agent.model === "string" ? undefined : agent.model.speed,
     });
@@ -4450,45 +4983,31 @@ export class SessionDO extends DurableObject<Env> {
       // model to read on demand via skill tools.
       if (this.env.CONFIG_KV) {
         try {
-          const skillFilesResults = await getSkillFiles(
-            agent.skills,
-            this.env.CONFIG_KV,
-            this.env.FILES_BUCKET,
-            this.state.tenant_id,
-          );
-          for (const sf of skillFilesResults) {
-            const skillDir = `/home/user/.skills/${sf.skillName}`;
-            try {
-              await sandbox.exec(`mkdir -p ${skillDir}`, 5000);
-            } catch {}
-            for (const file of sf.files) {
-              try {
-                if (sandbox.writeFileBytes) {
-                  await sandbox.writeFileBytes(
-                    `${skillDir}/${file.filename}`,
-                    file.bytes,
-                  );
-                } else {
-                  await sandbox.writeFile(
-                    `${skillDir}/${file.filename}`,
-                    new TextDecoder("utf-8").decode(file.bytes),
-                  );
-                }
-              } catch (err) {
-                // Best-effort: skip individual file write failures
-                logWarn(
-                  { op: "session_do.skill_file.write", session_id: this.state.session_id, skill: sf.skillName, filename: file.filename, err },
-                  "skill file write failed; skipping",
-                );
-              }
-            }
-          }
+          const managedSkillBinding = this.env.MAIN_MCP;
+          const skillFilesResults = managedSkillBinding?.resolveManagedSkillVersion
+            ? await getSkillFilesFromManagedSource(agent.skills, {
+                resolveManagedSkillVersion: (input) => managedSkillBinding.resolveManagedSkillVersion!({
+                  tenantId: this.state.tenant_id,
+                  ...input,
+                }),
+              })
+            : await getSkillFiles(
+                agent.skills,
+                this.env.CONFIG_KV,
+                this.env.FILES_BUCKET,
+                this.state.tenant_id,
+              );
+          // The canonical location is shared with Node and ACP Managed
+          // Runtimes. A compatibility mirror keeps historical prompts valid.
+          // Requested skills are required inputs, so a failed write aborts
+          // warmup instead of silently starting a weaker agent.
+          await mountSkillFiles(sandbox, skillFilesResults);
         } catch (err) {
-          // Best-effort
           logWarn(
             { op: "session_do.skill_files.mount", session_id: this.state.session_id, agent_id: agent.id, err },
             "skill files mount failed",
           );
+          throw err;
         }
       }
     }
@@ -4536,21 +5055,6 @@ export class SessionDO extends DurableObject<Env> {
         text: memoryPrompts[i],
       });
     }
-
-    // Create an abort controller for this execution. Stall detection now
-    // lives inside default-loop.ts (in-closure setTimeout next to the
-    // streamText call) so we no longer compose with a DO-instance
-    // controller here. Registered under the thread id so user.interrupt
-    // with `session_thread_id` aborts only the matching turn.
-    //
-    // Note: `turnThreadId` is also captured by the `delegateToAgent`
-    // closures above (in env / runtime blocks) so a sub-agent spawned
-    // from this turn records `parent_thread_id = turnThreadId` instead
-    // of always 'sthr_primary'. Closures eval lazily at harness.run
-    // time — TDZ for the const above is not a problem.
-    const abortController = new AbortController();
-    this._threadAbortControllers.set(turnThreadId, abortController);
-    const effectiveAbortSignal = abortController.signal;
 
     // Build the final system prompt: agent.system + platform guidance +
     // every platformReminder wrapped in a <source name="...">…</source>
@@ -4608,7 +5112,7 @@ export class SessionDO extends DurableObject<Env> {
               },
             }),
         delegateToAgent: async (agentId: string, message: string) => {
-          return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
+          return this.runSubAgent(agentId, message, history, sandbox, turnThreadId, effectiveAbortSignal);
         },
         watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
           this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -4619,11 +5123,11 @@ export class SessionDO extends DurableObject<Env> {
         sandbox,
         broadcast: (event) => {
           history.append(event);
-          this.broadcastEvent(event);
+          this.broadcastEvent(event, activeFence);
           this.fanOutToHooks(event);
           this.maybeCreditCacheTokens(turnThreadId, event);
         },
-        ...this.buildStreamRuntimeMethods(),
+        ...this.buildStreamRuntimeMethods(turnThreadId, activeFence),
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.creditUsageToThread(turnThreadId, { input_tokens, output_tokens });
         },
@@ -4650,7 +5154,7 @@ export class SessionDO extends DurableObject<Env> {
       // Broadcast running status
       const runningEvent: SessionEvent = { type: "session.status_running" };
       history.append(runningEvent);
-      this.broadcastEvent(runningEvent);
+      this.broadcastEvent(runningEvent, activeFence);
 
       await harness.run(ctx);
 
@@ -4711,9 +5215,9 @@ export class SessionDO extends DurableObject<Env> {
             getEvents: () => history.getEvents(),
             appendAndBroadcast: (event) => {
               history.append(event);
-              this.broadcastEvent(event);
+              this.broadcastEvent(event, activeFence);
             },
-            broadcastOnly: (event) => this.broadcastEvent(event),
+            broadcastOnly: (event) => this.broadcastEvent(event, activeFence),
             persistState: (delta) => {
               const next = { ...this.state };
               if ("outcome" in delta) next.outcome = delta.outcome ?? null;
@@ -4787,6 +5291,11 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
+      // Memory mutations are part of turn completion, not an asynchronous
+      // afterthought. This barrier precedes status_idle and execution settle.
+      await this.synchronizeManagedMemoryStores(activeFence);
+      managedMemorySynchronized = true;
+
       // Determine stop reason based on pending tool confirmations or custom tool results
       const pendingConfirmations = ctx.runtime.pendingConfirmations || [];
 
@@ -4824,8 +5333,18 @@ export class SessionDO extends DurableObject<Env> {
     } catch (err) {
       const errorMessage = this.describeError(err);
 
-      // Don't retry if aborted
-      if (err instanceof Error && err.name === "AbortError") {
+      // A lost execution fence is an expected cancellation, not a model or
+      // infrastructure failure.  The lease owner may have been replaced by
+      // another worker; retrying here would let the stale worker race the new
+      // owner and would also try to append a second error/idle pair through
+      // the fenced history wrapper.  Treat the sandbox guard's equivalent
+      // error the same way as an AbortError.
+      if (
+        err instanceof Error &&
+        (err.name === "AbortError" ||
+          err.name === "ExecutionFenceLostError" ||
+          err.name === "SandboxExecutionFencedError")
+      ) {
         // Interrupt handler (POST /event user.interrupt branch) already
         // appended its own session.status_idle synchronously before
         // the abort propagated, so the finally block must NOT emit a
@@ -4865,7 +5384,7 @@ export class SessionDO extends DurableObject<Env> {
           reason: errorMessage,
         };
         history.append(rescheduledEvent);
-        this.broadcastEvent(rescheduledEvent);
+        this.broadcastEvent(rescheduledEvent, activeFence);
 
         // Exponential backoff: 1s, 2s
         const delay = 1000 * Math.pow(2, retryCount);
@@ -4874,7 +5393,13 @@ export class SessionDO extends DurableObject<Env> {
         // finally). Suppress this frame's catch-all so we don't get
         // two status_idle events on a successful retry.
         idleEmitted = true;
-        return this.processUserMessage(userMessage, retryCount + 1, skipAppend);
+        return this.processUserMessage(
+          userMessage,
+          retryCount + 1,
+          skipAppend,
+          parentSignal,
+          activeFence,
+        );
       }
 
       if (isTransient) {
@@ -4883,7 +5408,7 @@ export class SessionDO extends DurableObject<Env> {
           reason: `${errorMessage} (exhausted ${retryCount} retries)`,
         };
         history.append(rescheduledEvent);
-        this.broadcastEvent(rescheduledEvent);
+        this.broadcastEvent(rescheduledEvent, activeFence);
       }
 
       const errorEvent: SessionEvent = {
@@ -4891,7 +5416,7 @@ export class SessionDO extends DurableObject<Env> {
         error: errorMessage,
       };
       history.append(errorEvent);
-      this.broadcastEvent(errorEvent);
+      this.broadcastEvent(errorEvent, activeFence);
 
       // Harness crashed — but session is recoverable.
       // The event log has everything up to the crash point.
@@ -4899,12 +5424,32 @@ export class SessionDO extends DurableObject<Env> {
       // Client can send a new user.message to retry.
     } finally {
       await disposeTools(allTools);
+      if (!managedMemorySynchronized) {
+        try {
+          // Error/cancel rescue pass. Reconciliation is idempotent, so a
+          // partially committed prior attempt is safe to retry here.
+          await this.synchronizeManagedMemoryStores(activeFence);
+          managedMemorySynchronized = true;
+        } catch (error) {
+          if (!(error instanceof Error && error.name === "ExecutionFenceLostError")) {
+            logWarn(
+              {
+                op: "session_do.memory_sync.rescue",
+                session_id: this.state.session_id,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "writable Managed Memory rescue sync failed",
+            );
+          }
+        }
+      }
       // Only delete if it's still ours — a sub-agent run within the same
       // thread may have temporarily replaced it. Same-thread re-entry is
       // mutex'd by _draining so this is theoretical safety only.
       if (this._threadAbortControllers.get(turnThreadId) === abortController) {
         this._threadAbortControllers.delete(turnThreadId);
       }
+      parentSignal?.removeEventListener("abort", abortFromParent);
       // Emit status_idle only after turn-scoped resources have settled. On a
       // successful turn this preserves its precise stop_reason; error paths
       // use the generic event because they have no meaningful stop reason.
@@ -4914,7 +5459,7 @@ export class SessionDO extends DurableObject<Env> {
         try {
           const idleEvent: SessionEvent = completedIdleEvent ?? { type: "session.status_idle" };
           history.append(idleEvent);
-          this.broadcastEvent(idleEvent);
+          this.broadcastEvent(idleEvent, activeFence);
         } catch (err) {
           console.warn(`[processUserMessage] catch-all idle emit failed:`, err);
         }
@@ -4993,7 +5538,9 @@ export class SessionDO extends DurableObject<Env> {
     // start the set is empty until the first alarm-fired
     // _checkOrphanTurns reconciles, but D1 is the source of truth so
     // orphan recovery still triggers from there.
-    return this._activeTurnIds.size > 0 ? "running" : "idle";
+    return this._activeTurnIds.size > 0 || this._executionActiveLanes.size > 0
+      ? "running"
+      : "idle";
   }
 
   /**
@@ -5557,7 +6104,12 @@ export class SessionDO extends DurableObject<Env> {
     // tasks) the second branch hit deleteAlarm() and silently undid
     // the heartbeat — DO would not get a wakeup and CF would evict
     // before the next external request arrived.
-    const wantsHeartbeat = await this._hasInflightTurn();
+    // Central execution leases are the primary v1 authority.  Keep the DO
+    // awake while one of its lanes is actively running; `_activeTurnIds`
+    // remains only for the legacy self-host fallback.  The durable D1 row
+    // still fences a replacement host if this alarm is lost.
+    const wantsHeartbeat =
+      this._executionActiveLanes.size > 0 || await this._hasInflightTurn();
     const heartbeatMs = wantsHeartbeat ? Date.now() + KEEP_ALIVE_INTERVAL_MS : null;
     let mergedNextMs: number | null = nextMs;
     if (heartbeatMs !== null) {
@@ -5568,6 +6120,33 @@ export class SessionDO extends DurableObject<Env> {
     } else {
       await this.ctx.storage.deleteAlarm();
     }
+  }
+
+  /**
+   * Re-drive durable execution work after a dropped service-binding wakeup or
+   * a DO restart.  The query is intentionally scoped to this session and
+   * returns lanes rather than event payloads; claim/lease/fence decisions
+   * remain inside SessionExecutionStorePort.
+   */
+  private async recoverExecutionQueue(): Promise<void> {
+    const db = (this.env as unknown as { MAIN_DB?: D1Database }).MAIN_DB;
+    const workspaceId = this.state.tenant_id;
+    const sessionId = this.state.session_id;
+    if (!db || !workspaceId || !sessionId) return;
+    const rows = await db
+      .prepare(
+        `SELECT DISTINCT lane_id
+           FROM managed_session_executions
+          WHERE workspace_id = ? AND session_id = ?
+            AND state IN ('queued', 'running')`,
+      )
+      .bind(workspaceId, sessionId)
+      .all<{ lane_id?: string }>();
+    const lanes = (rows.results ?? [])
+      .map((row) => row.lane_id)
+      .filter((lane): lane is string => typeof lane === "string" && lane.length > 0);
+    if (lanes.length === 0) return;
+    await Promise.all(lanes.map((lane) => this.drainEventQueue(lane)));
   }
 
   /**
@@ -5649,6 +6228,17 @@ export class SessionDO extends DurableObject<Env> {
       } else {
         this.ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id = ?`, row.id);
       }
+    }
+
+    // A service-binding wakeup is intentionally best-effort: the accepted
+    // event and execution outbox row are already durable in D1.  On the next
+    // DO alarm, sweep every lane that still has queued/expired-running work
+    // and let the same lease host reclaim it.  This closes the wakeup-loss
+    // window without introducing a queue or a second source of truth.
+    try {
+      await this.recoverExecutionQueue();
+    } catch (err) {
+      console.warn(`[alarm] central execution recovery failed:`, err);
     }
 
     // Stale-turn cleanup. Replaces the old _checkOrphanTurns →

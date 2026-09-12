@@ -1,0 +1,1 @@
+ALTER TABLE "managed_environment_work" ADD COLUMN "claim_generation" bigint DEFAULT 0 NOT NULL;

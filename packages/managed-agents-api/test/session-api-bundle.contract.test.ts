@@ -11,6 +11,77 @@ import {
 import { makeSessionsPort } from "./session-fixtures";
 
 describe("Managed Agents API — Sessions route bundle", () => {
+  it("exposes the OpenMA durable-output extension against Managed Sessions", async () => {
+    const api = new Hono<{ Variables: { workspaceId: string } }>();
+    api.use("/v1/*", async (c, next) => {
+      c.set("workspaceId", "workspace_outputs");
+      await next();
+    });
+    const sessions = makeSessionsPort({
+      retrieveSession: async ({ sessionId }) => sessionId === "session_01"
+        ? { type: "found", session: {} as never }
+        : { type: "not_found" },
+    });
+    api.route("/v1/sessions", buildManagedSessionsApi({
+      sessions,
+      sessionEvents: makeSessionEventsPort({}),
+      sessionResources: makeSessionResourcesPort({}),
+      sessionThreads: makeSessionThreadsPort({}),
+      sessionThreadEvents: makeSessionThreadEventsPort({}),
+    }, {
+      outputs: {
+        workspaceId: (context: Context) =>
+          (context.var as { workspaceId: string }).workspaceId,
+        store: {
+          list: async (workspaceId: string, sessionId: string) => [{
+            filename: `${workspaceId}-${sessionId}.txt`,
+            size_bytes: 9,
+            uploaded_at: "2026-09-09T00:00:00.000Z",
+            media_type: "text/plain",
+          }],
+          read: async () => ({
+            body: new Blob(["OUTPUT_OK"]).stream(),
+            size: 9,
+            contentType: "text/plain",
+          }),
+        },
+      },
+    }));
+
+    expect((await api.request("/v1/sessions/session_01/outputs")).status).toBe(400);
+    const managedHeaders = {
+      headers: { "anthropic-beta": "managed-agents-2026-04-01" },
+    };
+    const listed = await api.request(
+      "/v1/sessions/session_01/outputs",
+      managedHeaders,
+    );
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({
+      data: [{
+        filename: "workspace_outputs-session_01.txt",
+        size_bytes: 9,
+        uploaded_at: "2026-09-09T00:00:00.000Z",
+        media_type: "text/plain",
+      }],
+      has_more: false,
+    });
+    const output = await api.request(
+      "/v1/sessions/session_01/outputs/certification.txt",
+      managedHeaders,
+    );
+    expect(output.status).toBe(200);
+    await expect(output.text()).resolves.toBe("OUTPUT_OK");
+    expect((await api.request(
+      "/v1/sessions/missing/outputs",
+      managedHeaders,
+    )).status).toBe(404);
+    expect((await api.request(
+      "/v1/sessions/session_01/outputs/..%2Fsecret",
+      managedHeaders,
+    )).status).toBe(400);
+  });
+
   it("mounts the complete official Sessions surface from only request-scoped application Ports", async () => {
     const resolutions: string[] = [];
     const api = new Hono<{ Variables: { workspaceId: string } }>();

@@ -29,9 +29,17 @@ export type { AgentCreateBody } from "./contracts/agents";
 export type * from "./ports";
 export {
   buildManagedSessionsApi,
+  type ManagedSessionsApiExtensions,
   type ManagedSessionsApplicationPorts,
   type ManagedSessionsApplicationPortSources,
 } from "./managed-sessions-api";
+export {
+  buildManagedSessionOutputRoutes,
+  type ManagedSessionOutputReadResult,
+  type ManagedSessionOutputsExtension,
+  type ManagedSessionOutputsStore,
+  type ManagedSessionOutputView,
+} from "./routes/session-outputs";
 export { buildAgentRoutes } from "./routes/agents";
 export { buildCredentialRoutes } from "./routes/credentials";
 export { buildDeploymentRunRoutes } from "./routes/deployment-runs";

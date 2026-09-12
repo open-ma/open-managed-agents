@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./ports": "./src/ports.ts",
     "./adapters/cf-r2": "./src/adapters/cf-r2.ts",
     "./adapters/in-memory": "./src/adapters/in-memory.ts",
     "./adapters/s3": "./src/adapters/s3.ts",

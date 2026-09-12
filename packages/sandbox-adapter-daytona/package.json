@@ -1,0 +1,19 @@
+{
+  "name": "@open-managed-agents/sandbox-adapter-daytona",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/observability": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*"
+  },
+  "peerDependencies": { "@daytonaio/sdk": "^0.171.0" },
+  "peerDependenciesMeta": { "@daytonaio/sdk": { "optional": true } },
+  "devDependencies": { "@types/node": "^26.5.0", "vitest": "^4.1.3" }
+}

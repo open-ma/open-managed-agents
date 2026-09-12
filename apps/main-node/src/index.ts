@@ -10,6 +10,21 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import { OpenAIAgentsProtocolError } from "@open-managed-agents/openai-agents-api";
+import {
+  createArtifactsHandler,
+  createManagedSessionMapping,
+  createResourcesHandler,
+  createSessionsHandler,
+  isManagedNoEnvironmentSession,
+  readManagedSessionMappingMetadata,
+} from "@open-managed-agents/openai-agents-compat";
+import { SqlSessionThreadStore } from "@open-managed-agents/session-thread-store-sql";
+import { buildOpenAISubagentTools, nodeOpenAISubagentPolicy, openAISubagentSession } from "./openai-subagents.js";
+import { buildNodeOpenAIAgentsRoutes } from "./openai-agents.js";
+import { createNodeOpenAIAgentsRuntime } from "./openai-managed-runtime.js";
+import { createNodeOpenAIArtifactPublisher, withReportedArtifactPublication } from "./openai-artifact-publication.js";
+import { createNoEnvironmentSandbox, isNoEnvironmentSandbox } from "./openai-no-environment.js";
 import {
   createNodeLogger,
 } from "@open-managed-agents/observability/logger/node";
@@ -29,6 +44,7 @@ import {
 } from "@open-managed-agents/observability";
 import {
   createBetterSqlite3SqlClient,
+  createMysql2SqlClient,
   createPostgresSqlClient,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
@@ -60,7 +76,10 @@ import {
 } from "@open-managed-agents/shared";
 import { registerCoreHarnesses } from "@open-managed-agents/agent/harness/builtins";
 import { resolveHarness } from "@open-managed-agents/agent/harness/registry";
-import { buildTools } from "@open-managed-agents/agent/harness/tools";
+import {
+  buildTools,
+  disposeTools,
+} from "@open-managed-agents/agent/harness/tools";
 import {
   createPiModelRuntime,
   toAiSdkLanguageModel,
@@ -72,6 +91,8 @@ import type { HarnessContext } from "@open-managed-agents/agent/harness/interfac
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { applyBetterAuthSchema } from "@open-managed-agents/schema";
 import type { OmaDb } from "@open-managed-agents/db-schema";
+import { migrateNodeMysqlSchema } from "@open-managed-agents/db-schema/node-mysql";
+import { reconcilePiModelConfigMigration } from "./lib/reconcile-pi-model-config-migration.js";
 import { ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 import {
   buildAgentRoutes as buildLegacyAgentRoutes,
@@ -145,6 +166,7 @@ import {
   environmentWorkEnqueuerModule,
   environmentWorkEnvironmentSourcePort,
   environmentWorkSessionCredentialIssuerPort,
+  environmentWorkWakeupPort,
 } from "@open-managed-agents/app/modules/environment-work";
 import {
   memoryContentDescriptorPort,
@@ -196,12 +218,14 @@ import {
   SqlFileMetadataPersistence,
   SqlMemoryStoreSource,
   SqlManagedSessionsComposition,
+  SqlPersistedSessionEventStream,
   SqlSessionEnvironmentSource,
   SqlSessionSource,
   SqlSessionRuntimeProjectionPersistence,
 } from "@open-managed-agents/managed-agents-adapters-sql";
 import {
   createSqlSessionRuntimeReaders,
+  SqlSessionExecutionCoordinator,
 } from "@open-managed-agents/session-runtime-sql";
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
 import {
@@ -209,18 +233,25 @@ import {
   ApplicationDreamMemoryWorkspace,
   ModelCardCatalogSource,
   CronDeploymentSchedulePlanner,
+  EnvironmentAwareSessionEventDispatchRouter,
+  EnvironmentAwareSessionEventStreamRouter,
   EnvironmentAwareSessionLifecycleRouter,
+  ingestEnvironmentWorkRuntimeEvents,
   TimerEnvironmentWorkAvailabilityWaiter,
   IndeterminateCredentialValidationProbe,
   inProcessDreamExecutionSchedulerModule,
   LocalTunnelProvisioner,
-  OpaqueEnvironmentWorkSessionCredentialIssuer,
+  authenticateEnvironmentWorkSessionBearer,
+  SealedEnvironmentWorkSessionCredentialIssuer,
+  StandardWebhookEnvironmentWorkWakeup,
   DeduplicatingDreamCurator,
   WebCryptoTunnelCertificateAuthority,
   WebCryptoTunnelTokenManager,
   WebCryptoMemoryContentDescriptor,
   ZipSkillPackageCompiler,
+  synchronizeManagedSessionMemoryWorkspaces,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
+import { isCurrentEnvironmentWorkClaim } from "@open-managed-agents/environment-work-store";
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 import { buildOmaModelsHttpRoutes } from "@open-managed-agents/managed-agents-adapters-http";
 import {
@@ -247,10 +278,15 @@ import {
   sqlSessionMetadataReader,
 } from "./lib/feishu-agent-tools.js";
 import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
+import { NodeManagedSessionOutputCollector } from "./lib/node-managed-session-outputs.js";
 import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
+import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
-import { createAuthMiddleware as buildAuthMw } from "@open-managed-agents/auth";
+import {
+  createAuthMiddleware as buildAuthMw,
+  type ApiKeyResolution,
+} from "@open-managed-agents/auth";
 import {
   buildBetterAuth,
   ensureTenantSqlite,
@@ -266,6 +302,7 @@ import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { buildNodeScheduler } from "./lib/node-scheduler-jobs.js";
 import { startNodeMemoryQueue } from "./lib/node-memory-queue.js";
 import { mkdirSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { nanoid } from "nanoid";
 import {
@@ -280,6 +317,8 @@ import { ManagedNodeDefaultHarness } from "./lib/node-managed-default-harness.js
 import {
   allowAllLegacyHarnessTools,
   toLegacyHarnessAgentConfig,
+  toLegacyHarnessEnvironmentConfig,
+  resolveNodeManagedAuxiliaryToolModel,
 } from "./lib/node-managed-agent-codec.js";
 import { NodeManagedConfirmedToolExecutor } from "./lib/node-managed-confirmed-tool-executor.js";
 import { NodeManagedOutcomeEvaluator } from "./lib/node-managed-outcome-evaluator.js";
@@ -289,8 +328,32 @@ import {
   NodeManagedSessionRuntimeAdapter,
 } from "./lib/node-managed-session-runtime.js";
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
+import {
+  buildNodeManagedSkillReminders,
+  buildNodeManagedAppendablePromptReminders,
+  NodeManagedSessionInputPreparer,
+} from "./lib/node-managed-session-inputs.js";
+import { NodeManagedMemorySnapshotMaterializer } from "./lib/node-managed-memory-snapshots.js";
+import { NodeSessionExecutionWorker } from "./lib/node-session-execution-worker.js";
+import {
+  buildNodeHttpMcpProxyRoutes,
+  createNodeMcpProxyBinding,
+  type NodeMcpProxyTarget,
+} from "./lib/http-mcp-proxy.js";
+import {
+  resolveNodeProcessMode,
+  validateNodeProcessEnvironment,
+} from "./process-mode.js";
+import { resolveSandboxProviderForEnvironment } from "./sandbox-provider.js";
 
 registerCoreHarnesses();
+
+const processMode = resolveNodeProcessMode(process.env);
+validateNodeProcessEnvironment(process.env);
+const ownsLongLivedProcesses = processMode === "standalone";
+const standaloneSandboxProvider = ownsLongLivedProcesses
+  ? resolveSandboxProviderForEnvironment(process.env)
+  : null;
 
 const toMarkdownProvider = nodeToMarkdown();
 
@@ -316,10 +379,13 @@ const tracer: NodeTracerHandle = await createNodeTracer({
 
 const dbUrl = process.env.DATABASE_URL ?? "";
 const usePostgres = dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://");
-const dialect = usePostgres ? "postgres" : "sqlite";
+const useMysql = dbUrl.startsWith("mysql://") || dbUrl.startsWith("mysql2://");
+const dialect = usePostgres ? "postgres" : useMysql ? "mysql" : "sqlite";
 
 let sql: SqlClient;
 let backendDescription: string;
+let mysqlPool: import("mysql2/promise").Pool | null = null;
+let databaseShutdown: (() => Promise<void>) | null = null;
 // drizzleDb is the dependency-inversion seam new-style adapters take.
 // Constructed once at the composition root from the right concrete driver.
 // Existing SqlClient is still built alongside for the legacy applySchema /
@@ -333,6 +399,23 @@ if (usePostgres) {
   drizzleDb = drizzlePostgresJs(pgClient as never) as unknown as OmaDb<Record<string, unknown>>;
   const u = new URL(dbUrl);
   backendDescription = `postgres ${u.hostname}:${u.port || 5432}${u.pathname}`;
+} else if (useMysql) {
+  sql = await createMysql2SqlClient(dbUrl);
+  const mysql = await import("mysql2/promise");
+  mysqlPool = mysql.createPool({
+    uri: dbUrl,
+    supportBigNumbers: true,
+    bigNumberStrings: false,
+    timezone: "Z",
+  });
+  const { drizzle: drizzleMysql2 } = await import("drizzle-orm/mysql2");
+  drizzleDb = drizzleMysql2(mysqlPool) as unknown as OmaDb<Record<string, unknown>>;
+  const u = new URL(dbUrl);
+  backendDescription = `mysql ${u.hostname}:${u.port || 3306}${u.pathname}`;
+  databaseShutdown = async () => {
+    await mysqlPool?.end();
+    await (sql as import("@open-managed-agents/sql-client").Mysql2SqlClient).close();
+  };
 } else {
   const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -360,14 +443,17 @@ if (usePostgres) {
 const migrationsFolder = usePostgres
   ? new URL("../migrations", import.meta.url).pathname
   : new URL("../migrations-sqlite", import.meta.url).pathname;
+await reconcilePiModelConfigMigration(sql, dialect);
 if (usePostgres) {
   const { migrate } = await import("drizzle-orm/postgres-js/migrator");
   await migrate(drizzleDb as never, { migrationsFolder });
+} else if (useMysql) {
+  await migrateNodeMysqlSchema(sql, migrationsFolder);
 } else {
   const { migrate } = await import("drizzle-orm/better-sqlite3/migrator");
   migrate(drizzleDb as never, { migrationsFolder });
 }
-await ensureEventLogSchema(sql, dialect);
+if (!useMysql) await ensureEventLogSchema(sql, dialect);
 const managedAgentsPersistence = new SqlAgentPersistence(sql);
 const managedAgentsPlatform = createNodePlatform({
   features: {
@@ -406,6 +492,19 @@ const managedAgentsPlatform = createNodePlatform({
 // above so they're always created — the gate now only controls subsystem
 // wiring, not schema bootstrap.
 const platformRootSecret = process.env.PLATFORM_ROOT_SECRET;
+const openAIAgentsConfigurationCipher = platformRootSecret === undefined
+  ? null
+  : new WebCryptoAesGcm(platformRootSecret, "openai.agents.configuration");
+const openAIAgentsSecrets = {
+  seal: async (plaintext: string) => {
+    if (!openAIAgentsConfigurationCipher) throw new OpenAIAgentsProtocolError(503, "PLATFORM_ROOT_SECRET is required for confidential Agents API configuration", undefined, "configuration_unavailable");
+    return openAIAgentsConfigurationCipher.encrypt(plaintext);
+  },
+  open: async (ciphertext: string) => {
+    if (!openAIAgentsConfigurationCipher) throw new OpenAIAgentsProtocolError(503, "PLATFORM_ROOT_SECRET is required for confidential Agents API configuration", undefined, "configuration_unavailable");
+    return openAIAgentsConfigurationCipher.decrypt(ciphertext);
+  },
+};
 
 // ─── Auth ───────────────────────────────────────────────────────────────
 
@@ -437,6 +536,22 @@ if (!authDisabled) {
     authShutdown = async () => {
       await pgPool.end();
     };
+  } else if (useMysql) {
+    if (mysqlPool === null) throw new Error("MySQL pool was not initialized");
+    await applyBetterAuthSchema({ sql, dialect: "mysql" });
+    auth = buildBetterAuth({
+      database: mysqlPool,
+      sender,
+      secret: process.env.BETTER_AUTH_SECRET ?? randomFallback(),
+      baseURL: process.env.PUBLIC_BASE_URL,
+      googleClientId: process.env.GOOGLE_CLIENT_ID,
+      googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      githubClientId: process.env.GITHUB_CLIENT_ID,
+      githubClientSecret: process.env.GITHUB_CLIENT_SECRET,
+      requireEmailVerify: process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
+      cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
+      ensureTenant: (u) => ensureTenantSqlite(sql, u.id, u.name, u.email),
+    });
   } else {
     mkdirSync(dirname(authDbPath), { recursive: true });
     const BetterSqlite3 = (await import("better-sqlite3")).default;
@@ -549,14 +664,17 @@ const dreamsService = createSqliteDreamService({
 const memoryRepo = new SqlMemoryRepo(drizzleDb);
 // Memory blob watcher — wires chokidar fs events through
 // packages/queue's processMemoryEvent so CF + Node share one upsert
-// code path. PG mode uses the multi-replica-safe PG queue table; SQLite
-// single-instance uses an in-memory queue. Set MEMORY_QUEUE=disabled to
-// skip wiring and fall back to the legacy direct-call watcher.
+// code path. Every SQL backend uses the same durable lease/fence contract.
+// Set MEMORY_QUEUE=disabled to skip wiring and fall back to the legacy
+// direct-call watcher.
 const useQueue = (process.env.MEMORY_QUEUE ?? "auto") !== "disabled";
-const memoryWatcher = memoryBlobLocalDir && useQueue
+const memoryWatcher = !ownsLongLivedProcesses
+  ? { stop: async () => {} }
+  : memoryBlobLocalDir && useQueue
   ? await startNodeMemoryQueue({
-      mode: usePostgres ? "pg" : "in-memory",
-      sql: usePostgres ? sql : undefined,
+      mode: "sql",
+      sql,
+      sqlDialect: dialect,
       memoryRepo,
       memoryBlobs,
       memoryRoot: memoryBlobLocalDir,
@@ -567,7 +685,7 @@ const memoryWatcher = memoryBlobLocalDir && useQueue
 
 let s3Poller: { stop: () => Promise<void> } | null = null;
 let feishuRunner: { stop: () => Promise<void> } | null = null;
-if (s3MemoryConfig) {
+if (ownsLongLivedProcesses && s3MemoryConfig) {
   // memory_blob_poller_lease lives in the consolidated baseline already; no
   // separate schema bootstrap needed here.
   const replicaId = `replica_${process.pid}_${Math.floor(Math.random() * 1e9).toString(36)}`;
@@ -647,27 +765,13 @@ if (usePostgres) {
 
 // ─── Sandbox factory ────────────────────────────────────────────────────
 
-const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
-  subprocess: "@open-managed-agents/sandbox/adapters/local-subprocess",
-  litebox: "@open-managed-agents/sandbox/adapters/litebox",
-  boxlite: "@open-managed-agents/sandbox/adapters/litebox",
-  boxrun: "@open-managed-agents/sandbox/adapters/boxrun",
-  daytona: "@open-managed-agents/sandbox/adapters/daytona",
-  e2b: "@open-managed-agents/sandbox/adapters/e2b",
-};
-
 async function buildSandbox(
   sessionId: string,
   workdir: string,
 ): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
-  const provider = (process.env.SANDBOX_PROVIDER ?? "subprocess").toLowerCase();
-  const path = SANDBOX_PROVIDER_PATHS[provider];
-  if (!path) {
-    throw new Error(
-      `SANDBOX_PROVIDER=${provider} not recognized; valid: ${Object.keys(SANDBOX_PROVIDER_PATHS).join(", ")}`,
-    );
-  }
-  const mod = (await import(path)) as {
+  const selection = standaloneSandboxProvider
+    ?? resolveSandboxProviderForEnvironment(process.env);
+  const mod = (await import(selection.modulePath)) as {
     sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
   };
   return mod.sandboxFactory(
@@ -675,6 +779,12 @@ async function buildSandbox(
       sessionId,
       workdir,
       memoryRoot: memoryBlobLocalDir ?? "",
+      memoryWorkspace: {
+        getText: (key) => memoryBlobs.getText(key),
+        list: (prefix, cursor) => memoryBlobs.list(prefix, cursor),
+        put: (key, content) => memoryBlobs.put(key, content),
+        delete: (key) => memoryBlobs.delete(key),
+      },
       outputsRoot,
     },
     process.env,
@@ -742,10 +852,17 @@ async function buildNodeLanguageModel(
   agentModel: string | {
     id: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    providerOptions?: Record<string, unknown>;
+    provider_options?: Record<string, unknown>;
     speed?: string;
   },
 ) {
   const creds = await resolveNodeModelCreds(tenantId, agentModel);
+  const configuredProviderOptions =
+    typeof agentModel === "string"
+      ? undefined
+      : agentModel.providerOptions ?? agentModel.provider_options;
+  const piProviderOptions = configuredProviderOptions?.pi;
   return toAiSdkLanguageModel(createPiModelRuntime({
     model: creds.wireModel,
     apiKey: creds.apiKey,
@@ -753,6 +870,12 @@ async function buildNodeLanguageModel(
     baseURL: creds.baseURL,
     customHeaders: creds.customHeaders,
     piConfig: creds.piConfig,
+    providerOptions:
+      piProviderOptions &&
+      typeof piProviderOptions === "object" &&
+      !Array.isArray(piProviderOptions)
+        ? piProviderOptions as Record<string, unknown>
+        : undefined,
     thinkingLevel: typeof agentModel === "string" ? undefined : agentModel.effort,
     speed: typeof agentModel === "string"
       ? undefined
@@ -797,6 +920,13 @@ const sessionRegistry = new SessionRegistry({
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      providerOptions:
+        typeof input.agent.model !== "string" &&
+        input.agent.model.provider_options?.pi &&
+        typeof input.agent.model.provider_options.pi === "object" &&
+        !Array.isArray(input.agent.model.provider_options.pi)
+          ? input.agent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
       thinkingLevel:
         typeof input.agent.model === "string" ? undefined : input.agent.model.effort,
       speed:
@@ -842,19 +972,230 @@ await sessionRegistry.bootstrap();
 
 // ─── Official Managed Sessions composition ─────────────────────────────
 
+async function resolveNodeMcpProxyTarget(input: {
+  tenantId: string;
+  sessionId: string;
+  serverName: string;
+}): Promise<NodeMcpProxyTarget | null> {
+  const managedContext = await managedRuntimeReaders.executionContext.find({
+    workspaceId: input.tenantId,
+    sessionId: input.sessionId,
+  });
+  if (managedContext !== null) {
+    const server = managedContext.session.agent.mcpServers.find(
+      (candidate) => candidate.name === input.serverName,
+    );
+    if (server === undefined || server.type !== "url") return null;
+    for (const vaultId of managedContext.session.vaultIds) {
+      const records = await managedCredentialStore.list({
+        workspaceId: input.tenantId,
+        vaultId,
+        includeArchived: false,
+        limit: 100,
+      });
+      for (const record of records) {
+        const credential = record.credential;
+        const auth = credential.auth;
+        if (
+          (auth.type !== "static_bearer" && auth.type !== "mcp_oauth")
+          || auth.mcpServerUrl !== server.url
+        ) continue;
+        const accessToken = auth.type === "static_bearer"
+          ? auth.token
+          : auth.accessToken;
+        if (!accessToken) continue;
+        const target: NodeMcpProxyTarget = {
+          upstreamUrl: server.url,
+          accessToken,
+        };
+        if (auth.type === "mcp_oauth" && auth.refresh?.refreshToken) {
+          const tokenEndpointAuth = auth.refresh.tokenEndpointAuth;
+          target.refresh = {
+            refreshToken: auth.refresh.refreshToken,
+            tokenEndpoint: auth.refresh.tokenEndpoint,
+            clientId: auth.refresh.clientId,
+            clientSecret: tokenEndpointAuth.type === "none"
+              ? undefined
+              : tokenEndpointAuth.clientSecret ?? undefined,
+          };
+          target.onRefreshed = async (tokens) => {
+            await managedCredentialStore.replace({
+              workspaceId: input.tenantId,
+              vaultId,
+              credentialId: credential.id,
+              expectedRevision: record.revision,
+              next: {
+                ...credential,
+                auth: {
+                  ...auth,
+                  accessToken: tokens.access_token,
+                  refresh: {
+                    ...auth.refresh!,
+                    refreshToken: tokens.refresh_token,
+                  },
+                },
+                updatedAt: new Date().toISOString(),
+              },
+            });
+          };
+        }
+        return target;
+      }
+    }
+    return null;
+  }
+
+  const session = await sessionsService.get({
+    tenantId: input.tenantId,
+    sessionId: input.sessionId,
+  }).catch(() => null);
+  if (session === null || session.archived_at) return null;
+  const snapshot = session.agent_snapshot as {
+    mcp_servers?: Array<{
+      name: string;
+      url: string;
+      authorization_token?: string;
+    }>;
+  } | undefined;
+  const server = snapshot?.mcp_servers?.find((candidate) =>
+    candidate.name === input.serverName
+  );
+  if (server === undefined || !server.url) return null;
+  if (server.authorization_token) {
+    return {
+      upstreamUrl: server.url,
+      accessToken: server.authorization_token,
+    };
+  }
+  const vaultIds = session.vault_ids ?? [];
+  if (vaultIds.length === 0) return null;
+  const groups = await credentialService.listByVaults({
+    tenantId: input.tenantId,
+    vaultIds,
+  });
+  for (const group of groups) {
+    for (const credential of group.credentials) {
+      if (credential.archived_at !== null) continue;
+      const auth = credential.auth as {
+        type?: string;
+        mcp_server_url?: string;
+        bearer_token?: string;
+        token?: string;
+        access_token?: string;
+        refresh_token?: string;
+        token_endpoint?: string;
+        client_id?: string;
+        client_secret?: string;
+      };
+      if (auth.mcp_server_url !== server.url) continue;
+      const accessToken = auth.bearer_token ?? auth.token ?? auth.access_token;
+      if (!accessToken) continue;
+      const target: NodeMcpProxyTarget = {
+        upstreamUrl: server.url,
+        accessToken,
+      };
+      if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
+        target.refresh = {
+          refreshToken: auth.refresh_token,
+          tokenEndpoint: auth.token_endpoint,
+          clientId: auth.client_id,
+          clientSecret: auth.client_secret,
+        };
+        target.onRefreshed = async (tokens) => {
+          await credentialService.refreshAuth({
+            tenantId: input.tenantId,
+            vaultId: group.vault_id,
+            credentialId: credential.id,
+            auth: {
+              access_token: tokens.access_token,
+              refresh_token: tokens.refresh_token,
+            },
+          });
+        };
+      }
+      return target;
+    }
+  }
+  return null;
+}
+
+const nodeMcpProxyBinding = createNodeMcpProxyBinding({
+  resolveTarget: resolveNodeMcpProxyTarget,
+});
+
+const managedSessionResourceSecrets = new SqlSessionResourceSecretSource(sql, {
+  open: async (value) => {
+    if (managedResourceCipher === null) {
+      throw new Error(
+        "PLATFORM_ROOT_SECRET is required for managed Session repository credentials",
+      );
+    }
+    return managedResourceCipher.decrypt(value);
+  },
+});
+
+const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql);
+
+async function isManagedSessionExecutionFenceActive(fence: {
+  workspaceId: string;
+  sessionId: string;
+  executionId: string;
+  attemptId: string;
+  ownerId: string;
+  generation: number;
+  expiresAt: string;
+}): Promise<boolean> {
+  if (Date.parse(fence.expiresAt) <= Date.now()) return false;
+  const execution = await managedSessionExecutionCoordinator.find({
+    workspaceId: fence.workspaceId,
+    executionId: fence.executionId,
+  });
+  return execution?.state === "running"
+    && execution.sessionId === fence.sessionId
+    && execution.attempt?.id === fence.attemptId
+    && execution.attempt.ownerId === fence.ownerId
+    && execution.attempt.generation === fence.generation
+    && Date.parse(execution.attempt.leaseExpiresAt) > Date.now();
+}
+
+const managedSessionOutputCollector = new NodeManagedSessionOutputCollector({
+  outputsRoot,
+  isFenceActive: isManagedSessionExecutionFenceActive,
+});
+
 const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
+  subagentThreads: new SqlSessionThreadStore(sql),
+  subagentPolicy: ({ session }) => nodeOpenAISubagentPolicy(session, openAIAgentsSecrets),
+  resolveSubagentSession: async ({ workspaceId, session, request }) => {
+    const saved = await readManagedSessionMappingMetadata(session, openAIAgentsSecrets);
+    if (saved) return openAISubagentSession(session, request);
+    const member = session.agent.multiagent?.agents.find(item => item.type === "agent" && item.id === request.agentId);
+    if (!member || member.type !== "agent") throw new Error("Subagent is not in the configured callable agent roster");
+    const selected = await managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.agents).retrieveAgent({ agentId: member.id, version: member.version });
+    if (selected.type !== "found" || selected.agent.archivedAt !== null) throw new Error("Configured subagent is unavailable");
+    return { ...session, agent: { ...selected.agent, multiagent: null } };
+  },
   confirmedTools: new NodeManagedConfirmedToolExecutor({
-    buildExecutableTools: async ({ workspaceId, session, sandbox }) => {
+    buildExecutableTools: async ({ workspaceId, session, environment, sandbox }) => {
       const agent = allowAllLegacyHarnessTools(
         toLegacyHarnessAgentConfig(session),
       );
       const creds = await resolveNodeModelCreds(workspaceId, agent.model);
+      const auxiliary = await resolveNodeManagedAuxiliaryToolModel(
+        session,
+        (model) => buildNodeLanguageModel(workspaceId, model),
+      );
       return buildTools(agent, sandbox, {
         ANTHROPIC_API_KEY: creds.apiKey,
         ANTHROPIC_BASE_URL: creds.baseURL,
         toMarkdown: toMarkdownProvider,
         tenantId: workspaceId,
         sessionId: session.id,
+        mcpBinding: nodeMcpProxyBinding,
+        environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
+        auxModel: auxiliary?.model,
+        auxModelInfo: auxiliary?.modelInfo,
+        auxProviderOptions: auxiliary?.providerOptions,
       });
     },
   }),
@@ -877,29 +1218,156 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       };
     },
   }),
-  buildSandbox: ({ session }) =>
-    buildSandbox(
+  buildSandbox: async ({ session }) =>
+    await isManagedNoEnvironmentSession(session, openAIAgentsSecrets)
+      ? createNoEnvironmentSandbox()
+      : buildSandbox(
       session.id,
       join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", session.id),
     ),
+  prepareSandbox: async ({
+    workspaceId,
+    session,
+    sandbox,
+    runtimeGeneration,
+  }) => {
+    if (isNoEnvironmentSandbox(sandbox)) return;
+    const preparer = new NodeManagedSessionInputPreparer({
+      files: managedAgentsPlatform
+        .app({ workspaceId })
+        .port(managedAgentsPortTokens.files),
+      skillVersions: managedSkillsPlatform
+        .app({ workspaceId })
+        .port(managedAgentsPortTokens.skillVersions),
+      repositoryCredentials: managedSessionResourceSecrets,
+      memorySnapshots: new NodeManagedMemorySnapshotMaterializer(
+        managedMemoriesApplicationForWorkspace(workspaceId)
+          .port(managedAgentsPortTokens.memories),
+        {
+          getText: async (key) => (await memoryBlobs.getText(key))?.text ?? null,
+          put: (key, content) => memoryBlobs.put(key, content),
+        },
+      ),
+    });
+    await preparer.prepare({
+      workspaceId,
+      session,
+      sandbox,
+      runtimeGeneration,
+    });
+  },
+  synchronizeSandbox: async ({
+    workspaceId,
+    session,
+    sandbox,
+    runtimeGeneration,
+    executionFence,
+  }) => {
+    if (isNoEnvironmentSandbox(sandbox)) return;
+    await sandbox.synchronizeMemoryStores?.();
+    const memories = managedMemoriesApplicationForWorkspace(workspaceId)
+      .port(managedAgentsPortTokens.memories);
+    const result = await synchronizeManagedSessionMemoryWorkspaces(
+      { find: async () => session },
+      memories,
+      {
+        getText: async (key) => (await memoryBlobs.getText(key))?.text ?? null,
+        list: (prefix, cursor) => memoryBlobs.list(prefix, cursor),
+        put: (key, content) => memoryBlobs.put(key, content),
+        delete: (key) => memoryBlobs.delete(key),
+      },
+      {
+        workspaceId,
+        sessionId: session.id,
+        runtimeGeneration,
+        executionFence,
+        isFenceActive: isManagedSessionExecutionFenceActive,
+      },
+    );
+    if (result.type === "fence_lost") {
+      throw new Error(
+        `Managed Memory synchronization lost the execution fence for ${session.id}`,
+      );
+    }
+    if (result.type === "not_found") {
+      throw new Error(`Managed Session ${session.id} disappeared before Memory synchronization`);
+    }
+    if (result.recoveredWipes.length > 0) {
+      throw new Error(
+        `Writable Managed Memory workspace became distrusted: ${result.recoveredWipes.join(", ")}`,
+      );
+    }
+    if (result.conflicts.length > 0) {
+      logger.warn({
+        conflicts: result.conflicts,
+        op: "main-node.managed_memory.conflicts",
+        sessionId: session.id,
+        workspaceId,
+      }, "Managed Memory synchronization kept canonical winners for conflicts");
+    }
+    await managedSessionOutputCollector.synchronize({
+      workspaceId,
+      sessionId: session.id,
+      sandbox,
+      executionFence,
+    });
+  },
+  afterExecution: withReportedArtifactPublication(createNodeOpenAIArtifactPublisher({
+    historyForWorkspace: workspaceId => new SessionRuntimeHistoryApplicationService({ workspaceId, source: managedRuntimeReaders.history }),
+    filesForWorkspace: workspaceId => managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.files),
+    secrets: openAIAgentsSecrets,
+    isFenceActive: isManagedSessionExecutionFenceActive,
+    environmentId: session => `oai_env_${session.id}`,
+  }), (error, input) => {
+    logger.error({
+      err: error,
+      op: "main-node.openai_agents.artifact_publication_failed",
+      workspaceId: input.workspaceId,
+      sessionId: input.session.id,
+      executionId: input.executionFence.executionId,
+    }, "Completed Session output could not be published as an Agents API artifact");
+  }),
   buildModel: ({ workspaceId, session }) =>
     buildNodeLanguageModel(workspaceId, session.agent.model),
-  buildTools: async ({ workspaceId, session, sandbox }) => {
+  buildTools: async ({ workspaceId, session, environment, sandbox, subagents, delegateToAgent }) => {
     const agent = toLegacyHarnessAgentConfig(session);
     const creds = await resolveNodeModelCreds(workspaceId, agent.model);
-    return buildTools(agent, sandbox, {
+    const auxiliary = await resolveNodeManagedAuxiliaryToolModel(
+      session,
+      (model) => buildNodeLanguageModel(workspaceId, model),
+    );
+    const tools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: creds.apiKey,
       ANTHROPIC_BASE_URL: creds.baseURL,
       toMarkdown: toMarkdownProvider,
       tenantId: workspaceId,
       sessionId: session.id,
+      mcpBinding: nodeMcpProxyBinding,
+      environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
+      auxModel: auxiliary?.model,
+      auxModelInfo: auxiliary?.modelInfo,
+      auxProviderOptions: auxiliary?.providerOptions,
+      delegateToAgent,
     });
+    if (subagents && (await readManagedSessionMappingMetadata(session, openAIAgentsSecrets))?.agent.multi_agent?.enabled) {
+      for (const [name, definition] of Object.entries(buildOpenAISubagentTools(subagents))) {
+        let available = name;
+        while (Object.hasOwn(tools, available)) available = `openma_${available}`;
+        tools[available] = definition;
+      }
+    }
+    return tools;
   },
+  disposeTools,
   buildHarness: () => new ManagedNodeDefaultHarness(),
   buildHarnessContext: async (input) => {
     const agent = toLegacyHarnessAgentConfig(input.session);
     const creds = await resolveNodeModelCreds(input.workspaceId, agent.model);
     const rawSystemPrompt = input.session.agent.system ?? "";
+    const platformReminders = [
+      ...buildNodeManagedSkillReminders(input.session),
+      ...buildNodeManagedAppendablePromptReminders(input.session),
+    ];
     const feishuTools = await resolveFeishuAgentTools(input.session.id);
     return {
       agent,
@@ -908,8 +1376,9 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       tenant_id: input.workspaceId,
       tools: { ...input.tools, ...feishuTools },
       model: input.model,
-      systemPrompt: composeSystemPrompt(rawSystemPrompt),
+      systemPrompt: composeSystemPrompt(rawSystemPrompt, platformReminders),
       rawSystemPrompt,
+      platformReminders,
       env: {
         ANTHROPIC_API_KEY: creds.apiKey,
         ANTHROPIC_BASE_URL: creds.baseURL,
@@ -919,6 +1388,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   },
   clock: { now: () => new Date() },
   ids: { nextEventId: () => `sevt_${nanoid()}` },
+  runtimeGenerations: { next: () => `runtime_${nanoid()}` },
 });
 
 const managedRuntimeReaders = createSqlSessionRuntimeReaders(sql);
@@ -939,8 +1409,32 @@ const managedRuntimeDriver = new DefaultNodeManagedSessionRuntimeDriver({
       persistence: new SqlSessionRuntimeProjectionPersistence(sql),
     }),
 });
+const managedSessionExecutionWorker = new NodeSessionExecutionWorker({
+  coordinator: managedSessionExecutionCoordinator,
+  context: managedRuntimeReaders.executionContext,
+  runtime: {
+    run: async ({ executionId: _executionId, fence, ...input }) => {
+      await managedRuntimeDriver.accept({ ...input, executionFence: fence });
+    },
+    cancel: async (input) => {
+      managedRuntimeRunner.cancel(input);
+    },
+  },
+  ownerId: process.env.OMA_SESSION_EXECUTION_OWNER_ID ??
+    `node:${process.pid}:${nanoid()}`,
+  clock: { now: () => new Date() },
+  ids: { nextAttemptId: () => `attempt_${nanoid()}` },
+  leaseTtlMs: 30_000,
+  heartbeatIntervalMs: 10_000,
+  maxConcurrent: Number(process.env.OMA_SESSION_EXECUTION_CONCURRENCY ?? 8),
+  onError: (err) => logger.error(
+    { err, op: "main-node.session_execution.background_failed" },
+    "managed Session execution background operation failed",
+  ),
+});
 const managedSessionRuntime = new NodeManagedSessionRuntimeAdapter(
   managedRuntimeDriver,
+  managedSessionExecutionWorker,
 );
 
 const persistedManagedEnvironments = new SqlSessionEnvironmentSource(sql);
@@ -965,6 +1459,11 @@ const nodeManagedEnvironments: SessionEnvironmentSourcePort = {
     };
   },
 };
+const nodeSessionLifecycleHooks = nodeSessionLifecycle({
+  files: filesService,
+  filesBlob,
+  outputs: nodeOutputsAdapter(outputsRoot),
+});
 const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
   environments: nodeManagedEnvironments,
   runtime: managedSessionRuntime,
@@ -974,15 +1473,34 @@ const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
     stop: (input) =>
       managedEnvironmentWorkEnqueuerFor(input.workspaceId).stop(input),
   },
+  cleanupSession: async ({ workspaceId, sessionId }) => {
+    await nodeSessionLifecycleHooks.cascadeDeleteFiles?.({
+      tenantId: workspaceId,
+      sessionId,
+    });
+    await rm(
+      join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", sessionId),
+      { recursive: true, force: true },
+    );
+  },
 });
 const managedResourceCipher = platformRootSecret === undefined
   ? null
   : new WebCryptoAesGcm(platformRootSecret, "managed.sessions.resources");
 const managedSessionsComposition = new SqlManagedSessionsComposition({
   client: sql,
+  executionOutbox: true,
   environments: nodeManagedEnvironments,
   lifecycle: managedSessionLifecycle,
   runtime: managedSessionRuntime,
+  eventDispatch: new EnvironmentAwareSessionEventDispatchRouter({
+    runtime: managedSessionRuntime,
+  }),
+  eventStream: new EnvironmentAwareSessionEventStreamRouter({
+    environments: nodeManagedEnvironments,
+    runtime: managedSessionRuntime,
+    selfHosted: new SqlPersistedSessionEventStream(sql),
+  }),
   sealer: {
     seal: async (value) => {
       if (managedResourceCipher === null) {
@@ -1051,20 +1569,54 @@ const managedEnvironmentWorkCipher: EnvironmentWorkSecretCipher = {
     };
   },
 };
+const managedEnvironmentWorkSessionTokenCrypto = platformRootSecret === undefined
+  ? null
+  : new WebCryptoAesGcm(
+      platformRootSecret,
+      "managed.environment-work.session-token",
+    );
 const managedEnvironmentWorkCredentials =
-  new OpaqueEnvironmentWorkSessionCredentialIssuer({
-    nextToken: () => nanoid(48),
-    ...(process.env.PUBLIC_BASE_URL !== undefined && {
-      apiBaseUrl: process.env.PUBLIC_BASE_URL,
-    }),
-  });
+  managedEnvironmentWorkSessionTokenCrypto === null
+    ? {
+        issue: async () => ({
+          type: "rejected" as const,
+          message: "PLATFORM_ROOT_SECRET is required for managed Environment Work credentials",
+        }),
+        bindToClaim: async () => {
+          throw new Error(
+            "PLATFORM_ROOT_SECRET is required for managed Environment Work credentials",
+          );
+        },
+      }
+    : new SealedEnvironmentWorkSessionCredentialIssuer({
+        crypto: managedEnvironmentWorkSessionTokenCrypto,
+        now: () => new Date(),
+        ...(process.env.PUBLIC_BASE_URL !== undefined && {
+          apiBaseUrl: process.env.PUBLIC_BASE_URL,
+        }),
+      });
+const managedEnvironmentWebhookUrl = process.env.OMA_MANAGED_AGENTS_WEBHOOK_URL;
+const managedEnvironmentWebhookKey =
+  process.env.OMA_MANAGED_AGENTS_WEBHOOK_SIGNING_KEY;
+const managedEnvironmentWebhook =
+  managedEnvironmentWebhookUrl !== undefined
+  && managedEnvironmentWebhookKey !== undefined
+    ? new StandardWebhookEnvironmentWorkWakeup({
+        endpoint: managedEnvironmentWebhookUrl,
+        signingKey: managedEnvironmentWebhookKey,
+        organizationId: ({ workspaceId }) =>
+          process.env.OMA_MANAGED_AGENTS_ORGANIZATION_ID ?? workspaceId,
+        nextEventId: () => `whe_${nanoid()}`,
+      })
+    : null;
+const managedEnvironmentWorkStore = new SqlEnvironmentWorkStore(
+  sql,
+  managedEnvironmentWorkCipher,
+);
 const managedEnvironmentWorkPlatform = createNodePlatform({
   features: { preset: "none", environmentWork: true },
   stores: {
-    environmentWork: new SqlEnvironmentWorkStore(
-      sql,
-      managedEnvironmentWorkCipher,
-    ),
+    environmentWork: managedEnvironmentWorkStore,
   },
   clock: { now: () => new Date() },
   ids: {
@@ -1081,6 +1633,17 @@ const managedEnvironmentWorkPlatform = createNodePlatform({
       environmentWorkSessionCredentialIssuerPort,
       managedEnvironmentWorkCredentials,
     ),
+    providePort(environmentWorkWakeupPort, {
+      notifyRunStarted: async (input) => {
+        if (managedEnvironmentWebhook === null) return;
+        void managedEnvironmentWebhook.notifyRunStarted(input).catch((err) => {
+          logger.error(
+            { err, op: "main-node.environment_work.webhook_failed" },
+            "Managed Agents webhook wake-up failed; poll fallback remains active",
+          );
+        });
+      },
+    }),
     environmentWorkEnqueuerModule(),
   ],
 });
@@ -1305,8 +1868,17 @@ function managedMemoriesApplicationFor(context: unknown) {
   const request = (context as {
     var: { tenant_id: string; user_id?: string };
   }).var;
+  return managedMemoriesApplicationForWorkspace(
+    request.tenant_id,
+    request.user_id,
+  );
+}
+function managedMemoriesApplicationForWorkspace(
+  workspaceId: string,
+  userId?: string,
+) {
   return createNodeManagedAgentsApp({
-    workspaceId: request.tenant_id,
+    workspaceId,
     features: {
       preset: "none",
       memories: true,
@@ -1334,7 +1906,7 @@ function managedMemoriesApplicationFor(context: unknown) {
       providePort(memoryContentDescriptorPort, managedMemoryContent),
       providePort(
         memoryVersionActorPort,
-        managedMemoryActor(request.user_id),
+        managedMemoryActor(userId),
       ),
     ],
   });
@@ -1408,6 +1980,7 @@ const managedCredentialCipher: CredentialDocumentCipher = {
   },
 };
 const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
+const managedCredentialStore = new SqlCredentialStore(sql, managedCredentialCipher);
 const managedCredentialsPlatform = createNodePlatform({
   features: {
     preset: "none",
@@ -1415,7 +1988,7 @@ const managedCredentialsPlatform = createNodePlatform({
     vaults: true,
   },
   stores: {
-    credentials: new SqlCredentialStore(sql, managedCredentialCipher),
+    credentials: managedCredentialStore,
     vaults: new SqlVaultStore(sql),
   },
   credentialValidation: managedCredentialValidation,
@@ -1502,8 +2075,10 @@ const apiKeyStorage: ApiKeyStorage = {
   async insert({ id, hash, prefix, record }) {
     await sql
       .prepare(
-        `INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO api_keys (
+           id, tenant_id, user_id, name, prefix, hash,
+           credential_type, environment_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -1512,6 +2087,10 @@ const apiKeyStorage: ApiKeyStorage = {
         record.name,
         prefix,
         hash,
+        record.credential?.type ?? "workspace",
+        record.credential?.type === "environment"
+          ? record.credential.environmentId
+          : null,
         Date.parse(record.created_at),
       )
       .run();
@@ -1519,23 +2098,33 @@ const apiKeyStorage: ApiKeyStorage = {
   async listByTenant(tenantId) {
     const r = await sql
       .prepare(
-        `SELECT id, name, prefix, created_at FROM api_keys
+        `SELECT id, name, prefix, credential_type, environment_id, created_at FROM api_keys
           WHERE tenant_id = ? AND revoked_at IS NULL
           ORDER BY created_at DESC`,
       )
       .bind(tenantId)
-      .all<{ id: string; name: string; prefix: string; created_at: number }>();
+      .all<{
+        id: string;
+        name: string;
+        prefix: string;
+        credential_type: string;
+        environment_id: string | null;
+        created_at: number;
+      }>();
     return (r.results ?? []).map<ApiKeyMeta>((row) => ({
       id: row.id,
       name: row.name,
       prefix: row.prefix,
       created_at: new Date(row.created_at).toISOString(),
+      credential: row.credential_type === "environment" && row.environment_id !== null
+        ? { type: "environment", environmentId: row.environment_id }
+        : { type: "workspace" },
     }));
   },
   async findByHash(hash) {
     const row = await sql
       .prepare(
-        `SELECT id, tenant_id, user_id, name, created_at FROM api_keys
+        `SELECT id, tenant_id, user_id, name, credential_type, environment_id, created_at FROM api_keys
           WHERE hash = ? AND revoked_at IS NULL`,
       )
       .bind(hash)
@@ -1544,6 +2133,8 @@ const apiKeyStorage: ApiKeyStorage = {
         tenant_id: string;
         user_id: string | null;
         name: string;
+        credential_type: string;
+        environment_id: string | null;
         created_at: number;
       }>();
     if (!row) return null;
@@ -1553,6 +2144,9 @@ const apiKeyStorage: ApiKeyStorage = {
       ...(row.user_id ? { user_id: row.user_id } : {}),
       name: row.name,
       created_at: new Date(row.created_at).toISOString(),
+      credential: row.credential_type === "environment" && row.environment_id !== null
+        ? { type: "environment", environmentId: row.environment_id }
+        : { type: "workspace" },
     };
     return rec;
   },
@@ -1570,7 +2164,11 @@ const apiKeyStorage: ApiKeyStorage = {
 // ─── HTTP ───────────────────────────────────────────────────────────────
 
 const app = new Hono<{
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: {
+    tenant_id: string;
+    user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
 }>();
 
 // Observability middleware first so it captures auth failures, rate-limit
@@ -1604,7 +2202,9 @@ app.get("/health", (c) =>
       ? "disabled"
       : usePostgres
         ? "better-auth-pg"
-        : "better-auth-sqlite",
+        : useMysql
+          ? "better-auth-mysql"
+          : "better-auth-sqlite",
     backends: {
       agents: dialect,
       events: dialect,
@@ -1652,10 +2252,44 @@ const authMw = buildAuthMw({
     };
   },
   resolveApiKey: async (apiKey) => {
+    if (process.env.API_KEY && apiKey === process.env.API_KEY) {
+      return { tenantId: "default" };
+    }
     const hash = await sha256Hex(apiKey);
     const rec = await apiKeyStorage.findByHash(hash);
     if (!rec) return null;
-    return { tenantId: rec.tenant_id, userId: rec.user_id };
+    return {
+      tenantId: rec.tenant_id,
+      userId: rec.user_id,
+      credential: rec.credential,
+    };
+  },
+  resolveBearerToken: async ({ token, method, path }) => {
+    if (managedEnvironmentWorkSessionTokenCrypto === null) return null;
+    const scoped = await authenticateEnvironmentWorkSessionBearer({
+      token,
+      method,
+      path,
+      crypto: managedEnvironmentWorkSessionTokenCrypto,
+      now: () => new Date(),
+      isCurrent: (claim) => isCurrentEnvironmentWorkClaim({
+        store: managedEnvironmentWorkStore,
+        now: () => new Date(),
+      }, claim),
+    });
+    return scoped === null
+      ? null
+      : {
+          tenantId: scoped.workspaceId,
+          credential: {
+            type: "environment_work_session",
+            environmentId: scoped.environmentId,
+            sessionId: scoped.sessionId,
+            workId: scoped.workId,
+            claimedAt: scoped.claimedAt,
+            generation: scoped.generation,
+          },
+        };
   },
   defaultTenantForUser: async (userId) => {
     const row = await sql
@@ -1679,9 +2313,51 @@ const authMw = buildAuthMw({
 });
 
 const v1 = new Hono<{
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: {
+    tenant_id: string;
+    user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
 }>();
 v1.use("*", authMw);
+
+v1.post("/oma/sessions/:sessionId/runtime-events", async (c) => {
+  const credential = c.get("auth_credential");
+  if (credential?.type !== "environment_work_session") {
+    return c.json({ error: "Environment Work session credential required" }, 403);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  const result = await ingestEnvironmentWorkRuntimeEvents({
+    claim: {
+      workspaceId: c.get("tenant_id"),
+      environmentId: credential.environmentId,
+      sessionId: credential.sessionId,
+      workId: credential.workId,
+      generation: credential.generation,
+    },
+    sessionId: c.req.param("sessionId"),
+    body,
+    projection: new SessionRuntimeProjectionApplicationService({
+      workspaceId: c.get("tenant_id"),
+      persistence: managedSessionsComposition.runtimeProjection,
+    }),
+    publish: async () => {},
+  });
+  if (result.type === "recorded") {
+    return c.json({ data: result.eventIds.map((id) => ({ id })) }, 200);
+  }
+  if (result.type === "invalid_request") {
+    return c.json({ error: result.message }, 400);
+  }
+  if (result.type === "not_found") return c.json({ error: "Session not found" }, 404);
+  if (result.type === "forbidden") return c.json({ error: "Forbidden" }, 403);
+  return c.json({ error: result.type }, 409);
+});
 
 // Mount route bundles. Same paths CF uses; behavior preserved. Once a tenant
 // has configured model cards, agent model handles must resolve to an active
@@ -1736,12 +2412,18 @@ v1.route("/sessions", buildManagedSessionsApi({
     managedSessionsComposition.portsFor(
       (context.var as { tenant_id: string }).tenant_id,
     ).sessionThreadEvents,
+}, {
+  outputs: {
+    workspaceId: (context) =>
+      (context.var as { tenant_id: string }).tenant_id,
+    store: nodeOutputsAdapter(outputsRoot),
+  },
 }));
 v1.route("/oma/sessions", buildSessionRoutes({
   services,
   router: sessionRouter,
   outputs: nodeOutputsAdapter(outputsRoot),
-  lifecycle: nodeSessionLifecycle({ files: filesService, filesBlob }),
+  lifecycle: nodeSessionLifecycleHooks,
   // Node has no per-tenant cloud environments yet — every agent is treated
   // as a local runtime. The package's loadEnvironment hook returns a
   // synthetic snapshot so session create doesn't 404 on missing env_id.
@@ -1753,6 +2435,9 @@ v1.route("/oma/sessions", buildSessionRoutes({
       sandbox_template: null,
     } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
   },
+}));
+v1.route("/oma/mcp-proxy", buildNodeHttpMcpProxyRoutes({
+  resolveTarget: resolveNodeMcpProxyTarget,
 }));
 v1.route("/vaults", managedVaultsRoutes);
 v1.route("/vaults", managedCredentialsRoutes);
@@ -1982,7 +2667,12 @@ if (platformRootSecret) {
 // public URL is needed. Opt-in (`FEISHU_WS_RUNNER=1`) until it has been
 // exercised against real Feishu app credentials — otherwise a stale
 // publication with fake creds would dial out and backoff-loop on every boot.
-if (platformRootSecret && installBridge && process.env.FEISHU_WS_RUNNER === "1") {
+if (
+  ownsLongLivedProcesses
+  && platformRootSecret
+  && installBridge
+  && process.env.FEISHU_WS_RUNNER === "1"
+) {
   try {
     const { startFeishuWsRunner } = await import("./lib/ws-feishu-runner.js");
     const feishuContainer = installBridge.buildContainers().feishu;
@@ -2151,6 +2841,40 @@ v1.get("/oma/sessions/:id/memory_stores", async (c) => {
 });
 
 app.route("/v1", v1);
+app.route("/openai", buildNodeOpenAIAgentsRoutes({
+  authMiddleware: authMw,
+  portFor: (workspaceId) => {
+    const application = managedAgentsPlatform.app({ workspaceId });
+    const credentialApplication = managedCredentialsPlatform.app({ workspaceId });
+    const native = managedSessionsComposition.portsFor(workspaceId);
+    const agents = application.port(managedAgentsPortTokens.agents);
+    const environments = application.port(managedAgentsPortTokens.environments);
+    const files = application.port(managedAgentsPortTokens.files);
+    const runtime = createNodeOpenAIAgentsRuntime({
+      environments, sessions: native.sessions, secrets: openAIAgentsSecrets,
+      connectedSandbox: sessionId => managedRuntimeRunner.connectedSandbox({ workspaceId, sessionId }),
+    });
+    const resources = createResourcesHandler({
+      agents, environments, files, secrets: openAIAgentsSecrets, runtime: runtime.files,
+      vaults: credentialApplication.port(managedAgentsPortTokens.vaults),
+      credentials: credentialApplication.port(managedAgentsPortTokens.credentials),
+    });
+    const artifacts = createArtifactsHandler({
+      files,
+      requireSession: async sessionId => {
+        const found = await native.sessions.retrieveSession({ sessionId });
+        if (found.type !== "found") throw new OpenAIAgentsProtocolError(404, "Session not found");
+      },
+    });
+    const sessions = createSessionsHandler({
+      workspaceId, sessions: native.sessions, sessionEvents: native.sessionEvents,
+      history: new SessionRuntimeHistoryApplicationService({ workspaceId, source: managedRuntimeReaders.history }),
+      mapping: createManagedSessionMapping({ agents, environments, resources, secrets: openAIAgentsSecrets, runtime: runtime.mapping }),
+      resources: { execute: artifacts },
+    });
+    return { execute: request => request.operation.startsWith("sessions.") ? sessions.execute(request) : resources(request) };
+  },
+}));
 
 // ─── Integrations gateway (OAuth callbacks, setup pages, Linear MCP,
 // GitHub internal refresh, webhooks) — mounted on `app` (NOT under /v1)
@@ -2234,15 +2958,6 @@ app.onError((err, c) => {
 
 // ─── Listen ──────────────────────────────────────────────────────────────
 
-const port = Number(process.env.PORT ?? 8787);
-const host = process.env.HOST ?? "0.0.0.0";
-serve({ fetch: app.fetch, port, hostname: host }, (info) => {
-  logger.info(
-    { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },
-    `listening on http://${info.address}:${info.port}`,
-  );
-});
-
 // Cron — eval-tick + memory retention sweep + (when integrations schema is
 // applied) webhook-events retention. Linear dispatch is left un-wired here
 // because main-node doesn't construct a LinearProvider; pass `linearSweeper`
@@ -2258,11 +2973,10 @@ const scheduler = buildNodeScheduler({
   memory: memoryService,
   integrationsSql: platformRootSecret ? sql : null,
 });
-await scheduler.start();
-logger.info({ op: "main-node.scheduler.started" }, "scheduler started");
 
-const shutdown = async (signal: string) => {
+export const shutdownNodeApp = async (signal = "dispose") => {
   logger.info({ op: "main-node.shutdown", signal }, `received ${signal}, shutting down`);
+  managedSessionExecutionWorker.stop();
   try { await managedSessionsComposition.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_sessions_stop_failed" }, "managed Sessions app graphs stop failed"); }
   try { await managedAgentsPlatform.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_platform_stop_failed" }, "managed platform stop failed"); }
   try { await managedCredentialsPlatform.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_credentials_platform_stop_failed" }, "managed Credentials platform stop failed"); }
@@ -2282,12 +2996,37 @@ const shutdown = async (signal: string) => {
   if (authShutdown) {
     try { await authShutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.auth_failed" }, "auth shutdown failed"); }
   }
+  if (databaseShutdown) {
+    try { await databaseShutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.database_failed" }, "database shutdown failed"); }
+  }
   try { await sessionRegistry.shutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.session_registry_failed" }, "session registry shutdown failed"); }
   try { await tracer.shutdown(); } catch { /* tracer shutdown is best-effort */ }
-  process.exit(0);
 };
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
+
+export { app };
+
+if (ownsLongLivedProcesses) {
+  const port = Number(process.env.PORT ?? 8787);
+  const host = process.env.HOST ?? "0.0.0.0";
+  // Start the execution poller only after every runtime dependency below its
+  // declaration (Managed Memory/Skill applications included) has initialized.
+  managedSessionExecutionWorker.start();
+  serve({ fetch: app.fetch, port, hostname: host }, (info) => {
+    logger.info(
+      { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },
+      `listening on http://${info.address}:${info.port}`,
+    );
+  });
+  await scheduler.start();
+  logger.info({ op: "main-node.scheduler.started" }, "scheduler started");
+
+  const shutdownProcess = async (signal: string) => {
+    await shutdownNodeApp(signal);
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdownProcess("SIGTERM"));
+  process.on("SIGINT", () => void shutdownProcess("SIGINT"));
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 

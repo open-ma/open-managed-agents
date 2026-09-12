@@ -104,6 +104,13 @@ describe("Managed Agents API — GET /v1/agents/:agent_id", () => {
                 name: "docs",
                 url: "https://mcp.example.test",
               },
+              {
+                type: "stdio",
+                name: "workspace",
+                command: "/usr/local/bin/workspace-mcp",
+                args: ["--root", "/workspace"],
+                env: { LOG_LEVEL: "info" },
+              },
             ],
             multiagent: {
               type: "coordinator",
@@ -169,6 +176,13 @@ describe("Managed Agents API — GET /v1/agents/:agent_id", () => {
     expect(result).toMatchObject({
       mcp_servers: [
         { type: "url", name: "docs", url: "https://mcp.example.test" },
+        {
+          type: "stdio",
+          name: "workspace",
+          command: "/usr/local/bin/workspace-mcp",
+          args: ["--root", "/workspace"],
+          env: { LOG_LEVEL: "info" },
+        },
       ],
       multiagent: {
         type: "coordinator",

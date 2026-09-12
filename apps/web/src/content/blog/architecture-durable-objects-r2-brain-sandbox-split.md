@@ -175,9 +175,8 @@ interface Sandbox {
 }
 ```
 
-The same interface is implemented by `LocalSubprocess` (no isolation,
-for dev), `LiteBox` (lightweight container), `E2B`, `Daytona`,
-`BoxRun`. Picking a different sandbox is an env-var change. Harness
+The same interface is implemented by `LiteBox`, `E2B`, `Daytona`, and
+`BoxRun`. Picking a different isolated sandbox is an env-var change. Harness
 code never knows which one it's talking to.
 
 ## R2 for the slow tier

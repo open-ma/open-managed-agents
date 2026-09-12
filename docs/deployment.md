@@ -7,7 +7,8 @@ is wired at startup.
 
 | Mode | One-liner | When to pick |
 |---|---|---|
-| **Self-host** | `docker compose up` (or `pnpm --filter main-node start`) — single Node process + sqlite/pg + LocalSubprocess sandbox + `oma-vault` sidecar | Self-host, Fly.io / Render / VPS, no Cloudflare account, full control over data + binaries |
+| **Self-host** | `docker compose up` (or `pnpm --filter main-node start`) — Node control plane + sqlite/pg + explicit isolated sandbox provider + `oma-vault` sidecar | Self-host, Fly.io / Render / VPS, no Cloudflare account, full control over data + binaries |
+| **Fly.io** | `OPENMA_FLY_SANDBOX_PROVIDER=e2b OPENMA_FLY_DATA_MODE=sqlite pnpm setup:fly` — `main-fly` adapter + one always-on Machine + `/app/data` volume | Managed VM deployment of the portable Node topology without adopting Cloudflare primitives |
 | **CF local** | `pnpm dev` — `wrangler dev` on the main + agent workers with local D1/KV/R2/DO simulators | Develop against the CF runtime without touching prod; tests; one-off prod-shape repro |
 | **CF prod** | `pnpm deploy` (`scripts/deploy.sh`) — three workers (main / agent / integrations) on Cloudflare's network | Production at scale; you want CF to handle scaling, durability, edge presence; OK with vendor lock-in |
 
@@ -29,19 +30,19 @@ optional sidecar (`oma-vault`) for outbound credential injection.
               │  oma-server (apps/main-node)                 │
               │                                              │
               │  • Hono on Node, port 8787                   │
-              │  • better-auth (sqlite-backed) → /api/auth/* │
+              │  • better-auth (selected SQL backend)        │
               │  • REST + SSE → /v1/*                        │
-              │  • SqlClient (better-sqlite3 OR postgres.js) │
+              │  • SqlClient (sqlite / postgres / mysql)     │
               │  • SqlEventLog + InProcessEventStreamHub     │
               │  • LocalFsBlobStore + chokidar watcher       │
               │  • DefaultHarness (apps/agent shared code)   │
-              │  • SandboxExecutor: subprocess|litebox|...   │
+              │  • SandboxExecutor: explicit isolated port   │
               └──────────────────────┬───────────────────────┘
-                                     │ subprocess (default)
+                                     │ provider API / VM boundary
                           ┌──────────┴──────────┐
                           ▼                     ▼
-                  ./data/sandboxes/<sid>/   HTTPS_PROXY=http://oma-vault:14322
-                       (host fs)                  │
+                  isolated sandbox runtime    HTTPS_PROXY=http://oma-vault:14322
+                       (provider)                   │
                                                   ▼
                                     ┌──────────────────────────┐
                                     │ oma-vault (apps/oma-vault)│
@@ -58,15 +59,15 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 | Concern | Implementation |
 |---|---|
 | HTTP server | Hono on `@hono/node-server`, port 8787 |
-| SQL store | `better-sqlite3` (default, `./data/oma.db`) OR `postgres.js` (set `DATABASE_URL=postgres://...`) |
+| SQL store | `better-sqlite3` (default), `postgres.js` (`DATABASE_URL=postgres://...`), or `mysql2` (`DATABASE_URL=mysql://...`, MySQL 8.x) |
 | KV | not used at the API layer — agents/env config lives in the SQL `agents`/`environments` tables |
 | Blob store | `LocalFsBlobStore` (`./data/memory-blobs/<storeId>/<path>`); operator can swap in an S3 adapter when scaling |
 | Event log | `SqlEventLog` (per-session events in shared `session_events` table) + `InProcessEventStreamHub` (sqlite mode) or `PgEventStreamHub` (pg mode, LISTEN/NOTIFY-backed) for SSE fan-out |
-| Sandbox | `SANDBOX_PROVIDER=subprocess` (default, no isolation), `litebox` (Firecracker μVM), `daytona`, `e2b` |
-| Auth | `better-auth` on a separate `./data/auth.db` (sqlite). Email + password by default; Google OAuth optional. `AUTH_DISABLED=1` bypasses for single-user demos |
-| Vault credential injection | `apps/oma-vault` sidecar — mockttp HTTPS MITM proxy with self-signed CA. Reads vault credentials from the same sqlite db |
+| Sandbox | Required `SANDBOX_PROVIDER`: `litebox` (local Firecracker μVM), `boxrun`, `daytona`, or `e2b`; no non-isolated fallback |
+| Auth | `better-auth`; separate `auth.db` in SQLite mode, same server DB in Postgres/MySQL mode. `AUTH_DISABLED=1` bypasses for local demos |
+| Vault credential injection | Work-scoped HTTP MCP gateway for managed sandbox MCP; optional legacy `apps/oma-vault` sidecar is single-operator/advisory only |
 | Memory mount | sandbox symlinks `/mnt/memory/<storeName>` → `<MEMORY_BLOB_DIR>/<storeId>/`. chokidar watcher reflects fs writes back into the SQL `memories` index |
-| Cron | not wired yet (TODO: `node-cron` adapter for the per-tenant memory retention pass) |
+| Cron | `croner` per-minute scheduler; memory-version retention and eval/webhook sweeps run in-process |
 | Queue | not used — chokidar watcher replaces the R2-event Queue consumer |
 | Console UI | embedded in main-node image (`apps/console/dist` served by `serveStatic` middleware on the same `:8787` port, with SPA fallback). Skippable via `--build-arg SKIP_CONSOLE=1` for API-only image. `vite dev` mode also supported for live-reload |
 | Observability | `console.log` / `pino` (operator pipes stdout to Loki / Grafana) |
@@ -76,7 +77,7 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 ```bash
 # 1. Configure
 cp .env.example .env
-$EDITOR .env  # ANTHROPIC_API_KEY + BETTER_AUTH_SECRET
+$EDITOR .env  # BETTER_AUTH_SECRET + PLATFORM_ROOT_SECRET + isolated SANDBOX_PROVIDER and credentials
 
 # 2. Run (Docker compose: oma-server + oma-vault)
 docker compose -f docker-compose.yml up --build
@@ -107,6 +108,7 @@ curl -N -b cookies.txt localhost:8787/v1/sessions/$SID/events/stream
 
 ```bash
 pnpm install
+SANDBOX_PROVIDER=e2b E2B_API_KEY=... \
 ANTHROPIC_API_KEY=sk-... BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
   pnpm --filter @open-managed-agents/main-node start
 # Same curl flow as above against localhost:8787.
@@ -121,10 +123,30 @@ ANTHROPIC_API_KEY=sk-... BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
   sha256 etag). Caveats: `MEMORY_BLOB_DIR` must be on shared storage
   (NFS/EFS/shared docker volume); `auth.db` and `oma-vault` are still
   single-process (deferred). See `docs/self-host.md#running-multiple-oma-server-replicas-pg-mode-only`.
-- `LocalSubprocessSandbox` has zero isolation — `rm -rf /` from a
-  prompt-injected agent hits the host. Switch to `litebox` or `daytona`
-  for untrusted code.
+- Deployable Node entrypoints reject missing providers and the internal
+  subprocess test adapter. Every agent tool execution must cross an isolated
+  provider boundary.
 - No browser tool — `@cloudflare/playwright` is CF-only.
+
+### Fly.io adapter
+
+Fly deployments use `apps/main-fly` rather than importing platform-specific
+behavior into `main-node`. Before the Node composition loads, the adapter maps
+`FLY_APP_NAME` to the public HTTPS origin and pins every local durable path to
+the `/app/data` mount declared in `fly.toml`.
+
+```bash
+pnpm install
+fly auth login
+E2B_API_KEY=... OPENMA_FLY_SANDBOX_PROVIDER=e2b \
+  OPENMA_FLY_DATA_MODE=sqlite pnpm setup:fly
+```
+
+On first launch, Fly creates the `openma_data` volume from the checked-in
+`initial_size`, stages locally generated application secrets, deploys, and
+runs the configured health check. Postgres mode passes `--db mpg` to Fly
+Launch. A Fly Volume is single-Machine storage: keep SQLite at one Machine;
+use Postgres plus shared object storage before scaling the control plane.
 
 ---
 
@@ -287,16 +309,16 @@ pnpm deploy
 |---|---|---|---|
 | Process count | 1 (oma-server) + 1 sidecar (oma-vault) | 2 wrangler dev (main + agent) | 3 workers (main + agent + integrations) |
 | HTTP runtime | Hono on Node | workerd | workerd at edge |
-| SQL store | better-sqlite3 / postgres.js | D1 local sim | D1 (with optional shard router) |
+| SQL store | better-sqlite3 / postgres.js / mysql2 | D1 local sim | D1 (with optional shard router) |
 | KV / cache | none — SQL covers it | wrangler KV sim | CONFIG_KV |
 | Blob | LocalFsBlobStore (`./data`) | R2 local sim | R2 buckets |
 | Event log | SqlEventLog (shared SQL) | DO sqlite | DO sqlite |
 | Stream broadcast | InProcessEventStreamHub (sqlite) or PgEventStreamHub (pg, LISTEN/NOTIFY) for SSE | DO WS hibernation → SSE bridge | DO WS hibernation → SSE bridge |
-| Sandbox | subprocess / litebox / daytona / e2b | Container DO via Docker | Container DO on CF Containers |
-| Auth | better-auth + sqlite (own file) | better-auth + D1 local sim | better-auth + D1 + Email Workers + OAuth |
-| Vault inject | oma-vault sidecar (mockttp MITM) | MAIN_MCP.outboundForward RPC | MAIN_MCP.outboundForward RPC |
+| Sandbox | explicit litebox / boxrun / daytona / e2b | Container DO via Docker | Container DO on CF Containers |
+| Auth | better-auth + selected SQL backend | better-auth + D1 local sim | better-auth + D1 + Email Workers + OAuth |
+| Vault inject | Work-scoped HTTP MCP gateway; legacy oma-vault is advisory | fenced outbound handler + HTTP MCP gateway | fenced outbound handler + HTTP MCP gateway |
 | Memory mount | symlink to LocalFsBlobStore + chokidar | R2 sim + mountBucket(localBucket:true) | R2 + s3fs + R2 Events → Queue → D1 |
-| Cron | TODO (node-cron) | wrangler dev `--test-scheduled` | CF cron `* * * * *` |
+| Cron | `croner` per-minute scheduler (memory/eval/webhook jobs) | wrangler dev `--test-scheduled` | CF cron `* * * * *` |
 | Queue | none (chokidar replaces it) | wrangler queue sim | CF Queues + DLQ |
 | Browser tool | not supported | wrangler dev BROWSER sim (limited) | @cloudflare/playwright |
 | Email | nodemailer (set SMTP_HOST/PORT/USER/PASS) — null sender mounts no email-bearing better-auth flows | wrangler dev SEND_EMAIL sim | CF Email Workers |
@@ -307,7 +329,7 @@ pnpm deploy
 | Start cmd | `docker compose up` | `pnpm dev` | n/a (run-as-deployed) |
 | Deploy cmd | `docker compose up -d` | n/a (dev only) | `pnpm deploy` |
 | Multi-tenant | better-auth + tenant/membership tables | better-auth + tenant/membership tables | better-auth + tenant/membership tables + shard router |
-| Multi-instance | sqlite: no — single writer. pg: yes — LISTEN/NOTIFY fanout (shared `MEMORY_BLOB_DIR` required; auth.db + oma-vault still 1-proc) | n/a | scales by default |
+| Multi-instance | sqlite: no; pg: yes with LISTEN/NOTIFY; mysql: one replica until a shared realtime hub is configured | n/a | scales by default |
 
 ## Picking a topology
 

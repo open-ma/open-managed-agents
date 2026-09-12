@@ -59,7 +59,7 @@ jobs:
 
       - name: Setup pnpm
         # No version pin — reads `packageManager` from root package.json.
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -76,6 +76,12 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Storage integration tests
+        run: pnpm test:integration:storage
+
+      - name: MySQL integration tests
+        run: pnpm test:integration:mysql
 
       - name: Create / update Version Packages PR
         # No `publish-script` input → action only opens the Version PR. Publishing
@@ -108,7 +114,7 @@ jobs:
 
       - name: Setup pnpm
         # No version pin — reads `packageManager` from root package.json.
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

@@ -48,7 +48,7 @@ deployment under your control.
 | | |
 |---|---|
 | API surface | Drop-in compatible with `/v1/agents` and `/v1/sessions` |
-| Sandbox | Cloudflare Containers, LocalSubprocess, E2B, Daytona, BoxRun |
+| Sandbox | Cloudflare Containers, LiteBox, E2B, Daytona, BoxRun |
 | Storage | Cloudflare DO + R2, or Postgres + S3 |
 | BYOK | Yes — Anthropic, OpenAI, OpenRouter, custom OpenAI-compatible |
 | Custom harness | Yes — write your own loop |

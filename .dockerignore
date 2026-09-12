@@ -1,0 +1,6 @@
+.git
+**/node_modules
+**/dist
+**/coverage
+artifacts
+.DS_Store

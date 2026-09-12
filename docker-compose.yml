@@ -44,9 +44,13 @@ services:
       # Local FS blob store for uploaded files. When FILES_S3_ENDPOINT is
       # set the S3 backend is used instead and this var is ignored.
       FILES_BLOB_DIR: /app/data/files-blobs
+      # Required: deployable entrypoints do not expose the non-isolated
+      # local subprocess test adapter.
+      SANDBOX_PROVIDER: ${SANDBOX_PROVIDER:?Set SANDBOX_PROVIDER to an isolated provider}
       # Outbound credential injection via the oma-vault sidecar. When set,
-      # LocalSubprocessSandbox.setOutboundContext wires the subprocess env
-      # to route HTTPS traffic through oma-vault for header injection.
+      # the selected sandbox adapter wires its runtime to route HTTPS traffic
+      # through oma-vault for header injection. Remote providers need a proxy
+      # URL that is reachable from their sandbox network.
       OMA_VAULT_PROXY_URL: http://oma-vault:14322
       OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
       # Auth: better-auth sqlite-backed. AUTH_DISABLED=1 bypasses entirely

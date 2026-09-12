@@ -10,6 +10,7 @@ import type {
   SessionRealtimeFrame,
   SessionRealtimeHub,
 } from "@open-managed-agents/session-realtime";
+import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
 import * as runtimeModule from "../src/lib/node-managed-session-runtime.js";
 
@@ -53,6 +54,16 @@ const environment: Environment = {
   updatedAt: "2026-08-26T00:00:00.000Z",
 };
 
+const executionFence: SessionExecutionFence = {
+  executionId: "event_input_01",
+  workspaceId: "workspace_01",
+  sessionId: "session_01",
+  attemptId: "attempt_01",
+  ownerId: "node_01",
+  generation: 1,
+  expiresAt: "2026-08-26T01:01:00.000Z",
+};
+
 interface RuntimeEngine {
   start(
     input: runtimeModule.StartNodeManagedSessionRuntime,
@@ -76,6 +87,163 @@ interface DriverConstructor {
 }
 
 describe("DefaultNodeManagedSessionRuntimeDriver", () => {
+  it("projects a terminal error and idle state when sandbox startup fails", async () => {
+    const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine: {
+        start: async () => { throw new Error("sprite preparation failed"); },
+        stop: async () => {},
+        accept: async () => {},
+        archiveThread: async () => {},
+      },
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async (command) => {
+          projectionCalls.push(structuredClone(command));
+          return { type: "recorded", session };
+        },
+      }),
+      clock: { now: () => new Date("2026-08-26T00:30:00.000Z") },
+      ids: {
+        nextEventId: (() => {
+          let id = 0;
+          return () => `event_start_failure_0${++id}`;
+        })(),
+      },
+    });
+
+    await expect(driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_input_start_failure",
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:29:00.000Z",
+      }],
+      executionFence,
+    })).rejects.toThrow("sprite preparation failed");
+
+    expect(projectionCalls).toEqual([
+      {
+        sessionId: "session_01",
+        events: [{
+          id: "event_start_failure_01",
+          type: "session.error",
+          error: {
+            type: "unknown_error",
+            message: "sprite preparation failed",
+            retryStatus: "terminal",
+          },
+          processedAt: "2026-08-26T00:30:00.000Z",
+        }],
+        executionFence,
+      },
+      {
+        sessionId: "session_01",
+        events: [{
+          id: "event_start_failure_02",
+          type: "session.status_idle",
+          stopReason: { type: "end_turn" },
+          processedAt: "2026-08-26T00:30:00.000Z",
+        }],
+        executionFence,
+      },
+    ]);
+  });
+
+  it("commits runtime output under the execution fence that produced it", async () => {
+    let emit: ((frame: unknown) => Promise<void>) | undefined;
+    const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    const engine: RuntimeEngine = {
+      start: async (_input, output) => { emit = output; },
+      stop: async () => {},
+      accept: async () => {
+        await emit?.({
+          id: "event_status_fenced",
+          type: "session.status_running",
+          processed_at: "2026-08-26T01:00:00.000Z",
+        });
+      },
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async (command) => {
+          projectionCalls.push(structuredClone(command));
+          return { type: "recorded", session };
+        },
+      }),
+    });
+
+    await driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_input_01",
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:59:00.000Z",
+      }],
+      executionFence,
+    });
+
+    expect(projectionCalls).toEqual([{
+      sessionId: "session_01",
+      events: [{
+        id: "event_status_fenced",
+        type: "session.status_running",
+        processedAt: "2026-08-26T01:00:00.000Z",
+      }],
+      executionFence,
+    }]);
+  });
+
+  it("fails the producing attempt when its output fence is rejected", async () => {
+    let emit: ((frame: unknown) => Promise<void>) | undefined;
+    const engine: RuntimeEngine = {
+      start: async (_input, output) => { emit = output; },
+      stop: async () => {},
+      accept: async () => {
+        await emit?.({
+          id: "event_status_stale",
+          type: "session.status_running",
+          processed_at: "2026-08-26T01:00:00.000Z",
+        });
+      },
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async () => ({
+          type: "execution_fence_lost",
+        }),
+      }),
+    });
+
+    await expect(driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_input_01",
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:59:00.000Z",
+      }],
+      executionFence,
+    })).rejects.toThrow("execution fence was lost");
+  });
+
   it("publishes application-native frames through the injected realtime Port", async () => {
     let emit: ((frame: unknown) => Promise<void>) | undefined;
     const engine: RuntimeEngine = {
@@ -570,6 +738,56 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
         events: [event],
       },
     ]);
+  });
+
+  it("refreshes the engine with the current resource snapshot before accepting a turn", async () => {
+    const starts: Session[] = [];
+    const engine: RuntimeEngine = {
+      start: async (input) => { starts.push(input.session); },
+      stop: async () => {},
+      accept: async () => {},
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async () => ({ type: "recorded", session }),
+      }),
+    });
+    await driver.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    const currentSession: Session = {
+      ...session,
+      resources: [{
+        id: "sesrsc_file_01",
+        type: "file",
+        createdAt: "2026-08-26T04:00:00.000Z",
+        fileId: "file_01",
+        mountPath: "/mnt/session/uploads/file_01",
+        updatedAt: "2026-08-26T04:00:00.000Z",
+      }],
+    };
+
+    await driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session: currentSession,
+      environment,
+      events: [{
+        id: "event_after_resource_change",
+        type: "user.message",
+        content: [{ type: "text", text: "Use the new file" }],
+        processedAt: "2026-08-26T04:00:00.000Z",
+      }],
+    });
+
+    expect(starts).toEqual([session, currentSession]);
   });
 
   it("clears runtime ownership when engine stop fails", async () => {

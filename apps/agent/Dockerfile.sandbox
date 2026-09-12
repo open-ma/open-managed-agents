@@ -1,1 +1,1 @@
-FROM docker.io/openma/sandbox-base:80111f7801e9498e3254920227d213ab4b880259
+FROM docker.io/openma/sandbox-base:d93ab59176c988fb70e3be7ef2819f9b875383b5c0ff4ff5b0f6e269255037b7

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "@open-managed-agents/managed-agents-application";
+import * as managedAgentCodec from "../src/lib/node-managed-agent-codec.js";
 import {
   allowAllLegacyHarnessTools,
   toLegacyHarnessAgentConfig,
@@ -17,6 +18,9 @@ const session: Session = {
       id: "claude-opus-5",
       effort: "high",
       inferenceGeo: "us",
+      providerOptions: {
+        pi: { reasoning: "high", sampling: { temperature: 0 } },
+      },
       speed: "fast",
     },
     multiagent: {
@@ -38,6 +42,27 @@ const session: Session = {
       ],
     },
     name: "Coordinator",
+    openma: {
+      auxiliaryModel: {
+        id: "deepseek-chat",
+        providerOptions: { pi: { reasoning: "off" } },
+        speed: "fast",
+      },
+      appendablePrompts: ["prompt_review"],
+      harness: "pi",
+      acp: {
+        agent: { id: "pi", command: "pi-acp", args: ["--stdio"] },
+        restart: { mode: "on-crash", maxRestarts: 2, windowMs: 30_000 },
+        idleTimeoutMs: 60_000,
+        perTurnTimeoutMs: 120_000,
+      },
+      runtimeBinding: {
+        runtimeId: "runtime_local",
+        acpAgentId: "pi",
+        localSkillBlocklist: ["unsafe-skill"],
+      },
+      enableGeneralSubagent: true,
+    },
     skills: [{ type: "custom", skillId: "skill_review", version: "3" }],
     system: "Coordinate carefully",
     tools: [
@@ -107,11 +132,79 @@ const session: Session = {
 };
 
 describe("managed Agent to legacy Node harness codec", () => {
+  it("resolves the pinned auxiliary model for tool execution", async () => {
+    const resolveAuxiliary = (managedAgentCodec as Record<string, unknown>)
+      .resolveNodeManagedAuxiliaryToolModel as undefined | ((
+        session: Session,
+        buildModel: (model: Session["agent"]["model"]) => Promise<unknown>,
+      ) => Promise<unknown>);
+    expect(resolveAuxiliary).toBeTypeOf("function");
+    if (resolveAuxiliary === undefined) return;
+    const selectedModels: Session["agent"]["model"][] = [];
+    const model = { provider: "test-model" };
+
+    await expect(resolveAuxiliary(session, async (selected) => {
+      selectedModels.push(selected);
+      return model;
+    })).resolves.toEqual({
+      model,
+      modelInfo: { model_id: "deepseek-chat" },
+      providerOptions: { pi: { reasoning: "off" } },
+    });
+    expect(selectedModels).toEqual([{
+      id: "deepseek-chat",
+      providerOptions: { pi: { reasoning: "off" } },
+      speed: "fast",
+    }]);
+  });
+
+  it("projects Environment networking policy for the shared harness tools", () => {
+    const encodeEnvironment = (managedAgentCodec as Record<string, unknown>)
+      .toLegacyHarnessEnvironmentConfig as undefined | ((environment: unknown) => unknown);
+    expect(encodeEnvironment).toBeTypeOf("function");
+    if (encodeEnvironment === undefined) return;
+
+    expect(encodeEnvironment({
+      id: "env_limited",
+      archivedAt: null,
+      config: {
+        type: "cloud",
+        networking: {
+          type: "limited",
+          allowMcpServers: false,
+          allowPackageManagers: true,
+          allowedHosts: ["api.example.test"],
+        },
+        packages: { apt: [], cargo: [], gem: [], go: [], npm: [], pip: [] },
+      },
+      createdAt: "2026-09-09T00:00:00.000Z",
+      description: null,
+      metadata: {},
+      name: "Limited",
+      updatedAt: "2026-09-09T00:00:00.000Z",
+    })).toEqual({
+      networking: {
+        type: "limited",
+        allow_mcp_servers: false,
+        allow_package_managers: true,
+        allowed_hosts: ["api.example.test"],
+      },
+    });
+  });
+
   it("encodes application-native resolved definitions at the final adapter", () => {
     expect(toLegacyHarnessAgentConfig(session)).toEqual({
       id: "agent_coordinator",
       name: "Coordinator",
-      model: { id: "claude-opus-5", effort: "high", speed: "fast" },
+      model: {
+        id: "claude-opus-5",
+        effort: "high",
+        inference_geo: "us",
+        provider_options: {
+          pi: { reasoning: "high", sampling: { temperature: 0 } },
+        },
+        speed: "fast",
+      },
       system: "Coordinate carefully",
       tools: [
         {
@@ -176,6 +269,25 @@ describe("managed Agent to legacy Node harness codec", () => {
           { type: "advisor", model: "claude-haiku-4-5" },
         ],
       },
+      aux_model: {
+        id: "deepseek-chat",
+        provider_options: { pi: { reasoning: "off" } },
+        speed: "fast",
+      },
+      appendable_prompts: ["prompt_review"],
+      harness: "pi",
+      acp: {
+        agent: { id: "pi", command: "pi-acp", args: ["--stdio"] },
+        restart: { mode: "on-crash", max_restarts: 2, window_ms: 30_000 },
+        idle_timeout_ms: 60_000,
+        per_turn_timeout_ms: 120_000,
+      },
+      runtime_binding: {
+        runtime_id: "runtime_local",
+        acp_agent_id: "pi",
+        local_skill_blocklist: ["unsafe-skill"],
+      },
+      enable_general_subagent: true,
       version: 4,
       created_at: "2026-08-26T00:00:00.000Z",
       updated_at: "2026-08-26T00:00:01.000Z",

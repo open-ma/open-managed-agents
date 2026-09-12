@@ -6,7 +6,8 @@ image. **It does NOT deploy any worker to a Cloudflare account.**
 | Workflow | Purpose |
 |---|---|
 | `release.yml` | changeset-driven npm publish for the SDK / CLI packages |
-| `build-sandbox-image.yml` | builds the agent sandbox container image and pushes to GHCR for OSS users to pull |
+| `build-sandbox-image.yml` | builds the agent sandbox base image for OSS users to pull |
+| `build-server-image.yml` | verifies and publishes the Node/Console server image to GHCR under an immutable full-Git-SHA tag; release tags add a human version alias |
 
 ## Why no deploy workflows?
 

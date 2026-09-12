@@ -3,14 +3,20 @@ import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type {
   InitialSessionEvent,
+  SessionBootstrapEvent,
   Session,
 } from "@open-managed-agents/managed-agents-application";
 import {
   SqlSessionPersistence,
   SqlSessionRuntimeProjectionPersistence,
   SqlSessionSource,
+  SqlSessionThreadStore,
 } from "../src";
 import { sessionStorePortContract } from "./contracts/store-port-contracts";
+import {
+  ensureSessionExecutionCoordinatorSchema,
+  SqlSessionExecutionCoordinator,
+} from "@open-managed-agents/session-runtime-sql/coordination";
 
 const SCHEMA_SQL = `
 CREATE TABLE managed_sessions (
@@ -79,6 +85,23 @@ CREATE TABLE managed_session_resource_secrets (
   sealed_value text NOT NULL,
   updated_at integer NOT NULL,
   PRIMARY KEY (workspace_id, session_id, resource_id)
+);
+
+CREATE TABLE managed_environment_work (
+  workspace_id text NOT NULL,
+  environment_id text NOT NULL,
+  id text NOT NULL,
+  session_id text,
+  document text NOT NULL,
+  sealed_secret text NOT NULL,
+  claim_at integer,
+  claim_worker_id text,
+  claim_generation integer NOT NULL DEFAULT 0,
+  heartbeat_ttl_seconds integer NOT NULL,
+  revision integer NOT NULL,
+  state text NOT NULL,
+  created_at integer NOT NULL,
+  PRIMARY KEY (workspace_id, id)
 );
 `;
 
@@ -163,6 +186,56 @@ beforeEach(async () => {
 });
 
 describe("SqlSessionPersistence", () => {
+  it("durably queues bootstrap work during creation without duplicating accepted history", async () => {
+    await ensureSessionExecutionCoordinatorSchema(client);
+    const bootstrap: SessionBootstrapEvent[] = [
+      { type: "system.message", content: [{ type: "text", text: "Be precise" }] },
+      { type: "user.message", content: [{ type: "text", text: "Run once" }] },
+      { type: "user.message", content: [{ type: "text", text: "Include this context in the same execution" }] },
+    ];
+    await new SqlSessionPersistence(client, testSealer, { executionOutbox: true }).insert({
+      workspaceId: "workspace_01", session, initialEvents: bootstrap, resourceSecrets: [],
+    });
+    // A fresh coordinator can recover this work even if the post-commit
+    // lifecycle callback never runs or the creating process exits.
+    const coordinator = new SqlSessionExecutionCoordinator(client);
+    const result = await coordinator.claim({
+      workspaceId: "workspace_01", sessionId: session.id,
+      ownerId: "restarted-worker", attemptId: "attempt_bootstrap",
+      claimedAt: session.createdAt, leaseTtlMs: 30_000,
+    });
+    expect(result.type).toBe("claimed");
+    if (result.type !== "claimed") throw new Error("Bootstrap was not admitted");
+    expect(result.execution).toMatchObject({
+      id: `bootstrap_${session.id}:1`, laneId: "sthr_primary",
+      events: bootstrap.map((event, index) => ({
+        ...event, id: `bootstrap_${session.id}:${index}`, processedAt: session.createdAt,
+      })),
+    });
+    expect(await coordinator.admit({ execution: result.execution })).toMatchObject({ type: "replayed" });
+    await expect(client.prepare("SELECT COUNT(*) AS count FROM managed_session_events").first()).resolves.toEqual({ count: 0 });
+    await expect(client.prepare("SELECT COUNT(*) AS count FROM managed_session_initial_events").first()).resolves.toEqual({ count: 3 });
+    await coordinator.settle({ fence: result.fence, settledAt: session.createdAt, outcome: "completed" });
+    await expect(coordinator.claim({ ownerId: "another-worker", attemptId: "another-attempt", claimedAt: session.createdAt, leaseTtlMs: 30_000 })).resolves.toEqual({ type: "empty" });
+  });
+
+  it("does not queue empty or system-only bootstrap histories", async () => {
+    await ensureSessionExecutionCoordinatorSchema(client);
+    const store = new SqlSessionPersistence(client, testSealer, { executionOutbox: true });
+    await store.insert({ workspaceId: "workspace_01", session, initialEvents: [], resourceSecrets: [] });
+    await store.insert({ workspaceId: "workspace_01", session: { ...session, id: "system_only" }, initialEvents: [{ type: "system.message", content: [{ type: "text", text: "Context" }] }], resourceSecrets: [] });
+    await expect(client.prepare("SELECT COUNT(*) AS count FROM managed_session_executions").first()).resolves.toEqual({ count: 0 });
+  });
+
+  it("rolls back session and bootstrap history if execution admission fails", async () => {
+    // The missing execution table models an admission failure in the atomic batch.
+    await expect(new SqlSessionPersistence(client, testSealer, { executionOutbox: true }).insert({
+      workspaceId: "workspace_01", session, initialEvents, resourceSecrets: [],
+    })).rejects.toThrow();
+    await expect(client.prepare("SELECT COUNT(*) AS count FROM managed_sessions").first()).resolves.toEqual({ count: 0 });
+    await expect(client.prepare("SELECT COUNT(*) AS count FROM managed_session_initial_events").first()).resolves.toEqual({ count: 0 });
+  });
+
   it("atomically inserts the session, initial events, and memory-store index", async () => {
     const persistence = new SqlSessionPersistence(client, testSealer);
 
@@ -325,6 +398,300 @@ describe("SqlSessionPersistence", () => {
         .bind("workspace_01", session.id)
         .all<{ id: string }>(),
     ).resolves.toMatchObject({ results: [{ id: "event_runtime_01" }] });
+  });
+
+  it("projects native child lifecycle into thread CRUD under the same Session revision guard", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({ workspaceId: "workspace_01", session, initialEvents: [], resourceSecrets: [] });
+    const threads = new SqlSessionThreadStore(client);
+    const { multiagent: _multiagent, ...agent } = session.agent;
+    for (const workspaceId of ["workspace_01", "workspace_other"]) {
+      await threads.insert({ workspaceId, thread: {
+        id: "child_01", sessionId: session.id, agent: { ...agent, type: "agent" },
+        parentThreadId: "sthr_primary", status: "idle", archivedAt: null,
+        createdAt: session.createdAt, updatedAt: session.updatedAt, stats: null, usage: null,
+      } });
+    }
+    const projection = new SqlSessionRuntimeProjectionPersistence(client);
+    const event = { id: "child_started", type: "session.thread_status_running" as const,
+      sessionThreadId: "child_01", agentName: agent.name, processedAt: "2026-08-26T03:00:00.000Z" };
+    await projection.project({ workspaceId: "workspace_01", sessionId: session.id,
+      expectedRevision: 1, events: [event], next: session });
+    expect(await threads.find({ workspaceId: "workspace_01", sessionId: session.id, threadId: "child_01" }))
+      .toMatchObject({ status: "running", updatedAt: event.processedAt, agent: { name: agent.name } });
+    expect(await threads.find({ workspaceId: "workspace_other", sessionId: session.id, threadId: "child_01" }))
+      .toMatchObject({ status: "idle" });
+    await expect(projection.project({ workspaceId: "workspace_01", sessionId: session.id,
+      expectedRevision: 1, events: [{ ...event, id: "stale_close", type: "session.thread_status_terminated" }], next: session }))
+      .resolves.toEqual({ type: "revision_conflict", actualRevision: 2 });
+    expect(await threads.find({ workspaceId: "workspace_01", sessionId: session.id, threadId: "child_01" }))
+      .toMatchObject({ status: "running" });
+    await projection.project({ workspaceId: "workspace_01", sessionId: session.id,
+      expectedRevision: 2, events: [{ ...event, id: "child_finished", type: "session.thread_status_idle", stopReason: { type: "end_turn" } }], next: session });
+    expect(await threads.find({ workspaceId: "workspace_01", sessionId: session.id, threadId: "child_01" }))
+      .toMatchObject({ status: "idle" });
+  });
+
+  it("atomically fences runtime projection against a reclaimed execution", async () => {
+    await ensureSessionExecutionCoordinatorSchema(client);
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session: { ...session, status: "idle" },
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    const coordinator = new SqlSessionExecutionCoordinator(client);
+    await coordinator.admit({
+      execution: {
+        id: "execution_01",
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        admittedAt: "2026-08-26T02:00:00.000Z",
+        events: [{
+          id: "input_01",
+          type: "user.message",
+          content: [{ type: "text", text: "Run" }],
+          processedAt: "2026-08-26T02:00:00.000Z",
+        }],
+      },
+    });
+    const old = await coordinator.claim({
+      ownerId: "node_old",
+      attemptId: "attempt_old",
+      claimedAt: "2026-08-26T02:00:01.000Z",
+      leaseTtlMs: 1_000,
+    });
+    expect(old.type).toBe("claimed");
+    if (old.type !== "claimed") return;
+    const current = await sessions.findCurrent({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+    });
+    expect(current).not.toBeNull();
+    if (current === null) return;
+
+    await coordinator.claim({
+      ownerId: "node_new",
+      attemptId: "attempt_new",
+      claimedAt: "2026-08-26T02:00:03.000Z",
+      leaseTtlMs: 30_000,
+    });
+    const projection = new SqlSessionRuntimeProjectionPersistence(client, {
+      now: () => new Date("2026-08-26T02:00:04.000Z"),
+    });
+    const event = {
+      id: "stale_output_01",
+      type: "session.status_running" as const,
+      processedAt: "2026-08-26T02:00:04.000Z",
+    };
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: current.revision,
+      executionFence: old.fence,
+      events: [event],
+      next: {
+        ...current.session,
+        status: "running",
+        updatedAt: event.processedAt,
+      },
+    })).resolves.toEqual({ type: "execution_fence_lost" });
+    await expect(client.prepare(
+      "SELECT id FROM managed_session_events WHERE id = ?",
+    ).bind(event.id).first()).resolves.toBeNull();
+  });
+
+  it("treats an exact runtime event replay as idempotent without advancing revision", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session,
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    const projection = new SqlSessionRuntimeProjectionPersistence(client);
+    const event = {
+      id: "runtime_replay_01",
+      type: "session.status_idle" as const,
+      processedAt: "2026-08-26T03:00:00.000Z",
+      stopReason: { type: "end_turn" as const },
+    };
+    const next = {
+      ...session,
+      status: "idle" as const,
+      updatedAt: event.processedAt,
+    };
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 1,
+      events: [event],
+      next,
+    })).resolves.toMatchObject({
+      type: "projected",
+      record: { revision: 2 },
+    });
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 2,
+      events: [event],
+      next,
+    })).resolves.toEqual({
+      type: "projected",
+      record: { revision: 2, session: next },
+    });
+    await expect(client.prepare(
+      `SELECT COUNT(*) AS count FROM managed_session_events
+        WHERE workspace_id = ? AND session_id = ? AND id = ?`,
+    ).bind("workspace_01", session.id, event.id).first<{ count: number }>())
+      .resolves.toEqual({ count: 1 });
+  });
+
+  it("atomically fences an in-sandbox runtime projection against a reclaimed Environment Work", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session: { ...session, status: "idle" },
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    await client.prepare(
+      `INSERT INTO managed_environment_work
+        (workspace_id, environment_id, id, session_id, document, sealed_secret,
+         claim_at, claim_worker_id, claim_generation, heartbeat_ttl_seconds,
+         revision, state, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "workspace_01",
+      "env_01",
+      "work_01",
+      session.id,
+      "{}",
+      "sealed",
+      Date.parse("2026-08-26T02:00:03.000Z"),
+      "worker_new",
+      2,
+      90,
+      8,
+      "active",
+      Date.parse("2026-08-26T02:00:00.000Z"),
+    ).run();
+    const current = await sessions.findCurrent({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+    });
+    expect(current).not.toBeNull();
+    if (current === null) return;
+    const projection = new SqlSessionRuntimeProjectionPersistence(client, {
+      now: () => new Date("2026-08-26T02:00:04.000Z"),
+    });
+    const event = {
+      id: "stale_sandbox_output_01",
+      type: "session.status_running" as const,
+      processedAt: "2026-08-26T02:00:04.000Z",
+    };
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: current.revision,
+      environmentWorkFence: {
+        workspaceId: "workspace_01",
+        environmentId: "env_01",
+        sessionId: session.id,
+        workId: "work_01",
+        generation: 1,
+      },
+      events: [event],
+      next: {
+        ...current.session,
+        status: "running",
+        updatedAt: event.processedAt,
+      },
+    })).resolves.toEqual({ type: "execution_fence_lost" });
+    await expect(client.prepare(
+      "SELECT id FROM managed_session_events WHERE id = ?",
+    ).bind(event.id).first()).resolves.toBeNull();
+  });
+
+  it("rejects an exact runtime event replay after its Environment Work generation is fenced", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session: { ...session, status: "idle" },
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    await client.prepare(
+      `INSERT INTO managed_environment_work
+        (workspace_id, environment_id, id, session_id, document, sealed_secret,
+         claim_at, claim_worker_id, claim_generation, heartbeat_ttl_seconds,
+         revision, state, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "workspace_01",
+      "env_01",
+      "work_replay_01",
+      session.id,
+      "{}",
+      "sealed",
+      Date.parse("2026-08-26T02:00:03.000Z"),
+      "worker_old",
+      1,
+      90,
+      7,
+      "active",
+      Date.parse("2026-08-26T02:00:00.000Z"),
+    ).run();
+    const projection = new SqlSessionRuntimeProjectionPersistence(client, {
+      now: () => new Date("2026-08-26T02:00:04.000Z"),
+    });
+    const event = {
+      id: "runtime_fenced_replay_01",
+      type: "session.status_running" as const,
+      processedAt: "2026-08-26T02:00:04.000Z",
+    };
+    const next = {
+      ...session,
+      status: "running" as const,
+      updatedAt: event.processedAt,
+    };
+    const fence = {
+      workspaceId: "workspace_01",
+      environmentId: "env_01",
+      sessionId: session.id,
+      workId: "work_replay_01",
+      generation: 1,
+    };
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 1,
+      environmentWorkFence: fence,
+      events: [event],
+      next,
+    })).resolves.toMatchObject({
+      type: "projected",
+      record: { revision: 2 },
+    });
+    await client.prepare(
+      `UPDATE managed_environment_work
+          SET claim_worker_id = ?, claim_generation = ?, revision = revision + 1
+        WHERE workspace_id = ? AND id = ?`,
+    ).bind("worker_new", 2, "workspace_01", "work_replay_01").run();
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 2,
+      environmentWorkFence: fence,
+      events: [event],
+      next,
+    })).resolves.toEqual({ type: "execution_fence_lost" });
   });
 
   it("archives lifecycle state and increments the internal revision", async () => {

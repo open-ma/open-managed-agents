@@ -1,9 +1,12 @@
 import type {
   Agent,
+  AgentAcpConfig,
   AgentEffortLevel,
   AgentModel,
+  AgentRuntimeBinding,
   AgentSpeed,
 } from "../domain/agent";
+import type { JsonObject } from "../domain/json";
 import type {
   AgentMcpServerInput,
   AgentMultiagentInput,
@@ -24,7 +27,19 @@ export interface AgentModelInput {
   id: string;
   effort?: AgentEffortLevel | null;
   inferenceGeo?: string | null;
+  providerOptions?: JsonObject | null;
   speed?: AgentSpeed | null;
+}
+
+export interface AgentOpenMaInput {
+  auxiliaryModel?: string | AgentModelInput | null;
+  appendablePrompts?: string[] | null;
+  harness?: string | null;
+  acp?: AgentAcpConfig | null;
+  runtimeBinding?: AgentRuntimeBinding | null;
+  enableGeneralSubagent?: boolean | null;
+  /** Internal protocol-adapter state, never accepted from the public API. */
+  compatibility?: JsonObject | null;
 }
 
 export type AgentModelView = AgentModel;
@@ -36,6 +51,7 @@ export interface CreateAgentCommand {
   mcpServers?: AgentMcpServerInput[];
   metadata?: Record<string, string>;
   multiagent?: AgentMultiagentInput | null;
+  openma?: AgentOpenMaInput;
   skills?: AgentSkillInput[];
   system?: string | null;
   tools?: AgentToolInput[];
@@ -54,6 +70,7 @@ export interface UpdateAgentCommand {
   model?: string | AgentModelInput;
   multiagent?: AgentMultiagentInput | null;
   name?: string;
+  openma?: AgentOpenMaInput;
   skills?: AgentSkillInput[] | null;
   system?: string | null;
   tools?: AgentToolInput[] | null;

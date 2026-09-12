@@ -7,11 +7,137 @@
  * tracked separately in #155 — this module only guarantees round-trips.
  */
 import type { AgentRecord as Agent } from "../../types/agent";
+import yaml from "js-yaml";
+
+export function parseAgentConfigText(
+  source: string,
+  format: "yaml" | "json",
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = format === "yaml" ? yaml.load(source) : JSON.parse(source);
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(`Invalid ${format.toUpperCase()}${detail}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Agent config must be an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Apply create-only defaults without changing update patch semantics. */
+export function prepareCodePayload(
+  parsed: Record<string, unknown>,
+  opts: { forUpdate: boolean },
+): Record<string, unknown> {
+  const payload = structuredClone(parsed);
+  if (!opts.forUpdate) {
+    if (typeof payload.name !== "string" || payload.name.length === 0) {
+      throw new Error("name is required");
+    }
+    if (payload.tools === undefined) {
+      payload.tools = [{ type: "agent_toolset_20260401" }];
+    }
+  }
+  return payload;
+}
+
+function parseMetadataJson(source: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(`Invalid metadata JSON${detail}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Metadata JSON must be an object");
+  }
+  for (const value of Object.values(parsed)) {
+    if (typeof value !== "string") {
+      throw new Error("Metadata JSON values must be strings");
+    }
+  }
+  return parsed as Record<string, string>;
+}
+
+function metadataPatch(
+  current: Record<string, string>,
+  next: Record<string, string>,
+): Record<string, string | null> {
+  const patch: Record<string, string | null> = {};
+  for (const [key, value] of Object.entries(next)) {
+    if (current[key] !== value) patch[key] = value;
+  }
+  for (const key of Object.keys(current)) {
+    if (!Object.hasOwn(next, key)) patch[key] = null;
+  }
+  return patch;
+}
+
+/** Expand official update-patch semantics into a full editable config view. */
+export function materializeAgentUpdate(
+  current: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = structuredClone(current);
+  for (const [key, value] of Object.entries(patch)) {
+    if (RESPONSE_ONLY_KEYS.has(key)) continue;
+    if (key === "metadata") {
+      const currentMetadata =
+        next.metadata &&
+        typeof next.metadata === "object" &&
+        !Array.isArray(next.metadata)
+          ? (next.metadata as Record<string, string>)
+          : {};
+      if (value === null) {
+        next.metadata = {};
+      } else if (value && typeof value === "object" && !Array.isArray(value)) {
+        const metadata = { ...currentMetadata };
+        for (const [metadataKey, metadataValue] of Object.entries(value)) {
+          if (metadataValue === null) delete metadata[metadataKey];
+          else if (typeof metadataValue === "string") metadata[metadataKey] = metadataValue;
+          else throw new Error("Metadata patch values must be strings or null");
+        }
+        next.metadata = metadata;
+      } else {
+        throw new Error("Metadata patch must be an object or null");
+      }
+      continue;
+    }
+    if (key === "_oma" && value && typeof value === "object" && !Array.isArray(value)) {
+      const extension =
+        next._oma && typeof next._oma === "object" && !Array.isArray(next._oma)
+          ? structuredClone(next._oma as Record<string, unknown>)
+          : {};
+      for (const [extensionKey, extensionValue] of Object.entries(value)) {
+        if (extensionValue === null) delete extension[extensionKey];
+        else extension[extensionKey] = structuredClone(extensionValue);
+      }
+      if (Object.keys(extension).length > 0) next._oma = extension;
+      else delete next._oma;
+      continue;
+    }
+    if (
+      value === null &&
+      (key === "mcp_servers" || key === "skills" || key === "tools")
+    ) {
+      next[key] = [];
+      continue;
+    }
+    next[key] = structuredClone(value);
+  }
+  return next;
+}
 
 export interface McpEntry {
   name: string;
-  type: string;
+  type: "url" | "stdio";
   url: string;
+  command: string;
+  argsJson: string;
+  envJson: string;
   /** Stable identity used to preserve fields when an existing server is renamed. */
   originalName?: string;
 }
@@ -25,7 +151,7 @@ export interface SkillEntry {
 export interface CallableEntry {
   type: "agent";
   id: string;
-  version: number;
+  version?: number;
 }
 
 export type ToolOverride = "default" | "always_allow" | "always_ask" | "disabled";
@@ -33,55 +159,66 @@ export type ToolOverride = "default" | "always_allow" | "always_ask" | "disabled
 export type FormState = {
   name: string;
   model: string;
-  /** Preserved from `{ id, speed }` model objects; not edited in Form UI yet. */
+  /** Preserved from model config objects; not edited in Form UI yet. */
   modelSpeed: "" | "standard" | "fast";
+  auxiliaryModel: string;
+  auxiliaryModelSpeed: "" | "standard" | "fast";
+  appendablePrompts: string[];
+  metadataJson: string;
   system: string;
   description: string;
   modelCardId: string;
   mcpServers: McpEntry[];
   skills: SkillEntry[];
   callableAgents: CallableEntry[];
-  runtimeId: string;
-  acpAgentId: string;
-  localSkillBlocklist: string[];
   toolDefaultEnabled: boolean;
   toolDefaultPermission: "always_allow" | "always_ask";
   toolOverrides: Record<string, ToolOverride>;
-  enableGeneralSubagent: boolean;
 };
 
 export const INITIAL_FORM: FormState = {
   name: "",
   model: "",
   modelSpeed: "",
+  auxiliaryModel: "",
+  auxiliaryModelSpeed: "",
+  appendablePrompts: [],
+  metadataJson: "{}",
   system: "",
   description: "",
   modelCardId: "",
   mcpServers: [],
   skills: [],
   callableAgents: [],
-  runtimeId: "",
-  acpAgentId: "claude-agent-acp",
-  localSkillBlocklist: [],
   toolDefaultEnabled: true,
   toolDefaultPermission: "always_allow",
   toolOverrides: {},
-  enableGeneralSubagent: false,
 };
 
 const RESPONSE_ONLY_KEYS = new Set([
   "id",
+  "type",
   "version",
   "created_at",
   "updated_at",
   "archived_at",
 ]);
 
+const OMA_ONLY_KEYS = new Set([
+  "runtime_binding",
+  "harness",
+  "acp",
+  "aux_model",
+  "appendable_prompts",
+  "enable_general_subagent",
+  "callable_agents",
+]);
+
 /** Clone an API agent into a config baseline for lossless form merges. */
 export function agentToPreservedConfig(agent: Agent): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(agent as unknown as Record<string, unknown>)) {
-    if (RESPONSE_ONLY_KEYS.has(k)) continue;
+    if (RESPONSE_ONLY_KEYS.has(k) || OMA_ONLY_KEYS.has(k)) continue;
     if (v === undefined) continue;
     out[k] = structuredClone(v);
   }
@@ -138,34 +275,51 @@ function modelSpeedOf(model: unknown): "" | "standard" | "fast" {
   return speed === "standard" || speed === "fast" ? speed : "";
 }
 
-type RuntimeBinding = {
-  runtime_id?: string;
-  acp_agent_id?: string;
-  local_skill_blocklist?: string[];
-};
-
 /** Map an API / pasted config into form state (lossy by design for the UI). */
 export function configToForm(config: Record<string, unknown>): FormState {
-  const oma = config._oma as { runtime_binding?: RuntimeBinding } | undefined;
-  const rb: RuntimeBinding | undefined =
-    oma?.runtime_binding ?? (config.runtime_binding as RuntimeBinding | undefined);
   const toolPolicy = parseToolPolicy(
     Array.isArray(config.tools) ? (config.tools as unknown[]) : undefined,
   );
-  const multiagent = config.multiagent as { agents?: CallableEntry[] } | undefined;
+  const multiagent = config.multiagent as {
+    agents?: Array<Record<string, unknown>>;
+  } | undefined;
+  const openma =
+    config._oma && typeof config._oma === "object"
+      ? (config._oma as Record<string, unknown>)
+      : undefined;
   return {
     ...INITIAL_FORM,
     name: String(config.name || ""),
     model: modelIdOf(config.model) || (typeof config.model === "string" ? config.model : ""),
     modelSpeed: modelSpeedOf(config.model),
+    auxiliaryModel: modelIdOf(openma?.aux_model),
+    auxiliaryModelSpeed: modelSpeedOf(openma?.aux_model),
+    appendablePrompts: Array.isArray(openma?.appendable_prompts)
+      ? openma.appendable_prompts.filter(
+          (prompt): prompt is string => typeof prompt === "string",
+        )
+      : [],
+    metadataJson:
+      config.metadata &&
+      typeof config.metadata === "object" &&
+      !Array.isArray(config.metadata)
+        ? JSON.stringify(config.metadata, null, 2)
+        : "{}",
     modelCardId: "",
     system: String(config.system || ""),
     description: String(config.description || ""),
     mcpServers: Array.isArray(config.mcp_servers)
       ? (config.mcp_servers as Array<Record<string, unknown>>).map((m) => ({
           name: String(m.name || ""),
-          type: String(m.type || "url"),
+          type: m.type === "stdio" ? "stdio" as const : "url" as const,
           url: typeof m.url === "string" ? m.url : "",
+          command: typeof m.command === "string" ? m.command : "",
+          argsJson: JSON.stringify(Array.isArray(m.args) ? m.args : []),
+          envJson: JSON.stringify(
+            m.env && typeof m.env === "object" && !Array.isArray(m.env)
+              ? m.env
+              : {},
+          ),
           originalName: String(m.name || "") || undefined,
         }))
       : [],
@@ -177,19 +331,19 @@ export function configToForm(config: Record<string, unknown>): FormState {
         }))
       : [],
     callableAgents: Array.isArray(multiagent?.agents)
-      ? multiagent.agents.map((a) => ({
-          type: "agent" as const,
-          id: a.id,
-          version: a.version ?? 1,
-        }))
-      : [],
-    runtimeId: rb?.runtime_id ?? "",
-    acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
-    localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist)
-      ? rb.local_skill_blocklist
+      ? multiagent.agents.flatMap((entry): CallableEntry[] =>
+          entry.type === "agent" && typeof entry.id === "string"
+            ? [{
+                type: "agent",
+                id: entry.id,
+                ...(typeof entry.version === "number" && Number.isInteger(entry.version)
+                  ? { version: entry.version }
+                  : {}),
+              }]
+            : [],
+        )
       : [],
     ...toolPolicy,
-    enableGeneralSubagent: config.enable_general_subagent === true,
   };
 }
 
@@ -199,33 +353,98 @@ export function agentToForm(agent: Agent): FormState {
 
 export function buildModelValue(
   form: FormState,
-): string | { id: string; speed: "standard" | "fast" } {
-  if (form.modelSpeed === "standard" || form.modelSpeed === "fast") {
-    return { id: form.model, speed: form.modelSpeed };
+  existingModel?: unknown,
+): string | Record<string, unknown> {
+  if (
+    existingModel &&
+    typeof existingModel === "object" &&
+    !Array.isArray(existingModel) &&
+    modelIdOf(existingModel) === form.model
+  ) {
+    const model = structuredClone(existingModel as Record<string, unknown>);
+    model.id = form.model;
+    if (form.modelSpeed === "standard" || form.modelSpeed === "fast") {
+      model.speed = form.modelSpeed;
+    } else {
+      delete model.speed;
+    }
+    return model;
   }
-  return form.model;
+  return form.modelSpeed === "standard" || form.modelSpeed === "fast"
+    ? { id: form.model, speed: form.modelSpeed }
+    : form.model;
 }
 
 /** Form-managed built-in toolset entry only. */
-export function buildManagedToolset(form: FormState): Record<string, unknown> {
-  const overrides = Object.entries(form.toolOverrides)
-    .filter(([, v]) => v !== "default")
-    .map(([name, v]) => {
-      if (v === "disabled") return { name, enabled: false };
-      return {
-        name,
-        enabled: true,
-        permission_policy: { type: v as "always_allow" | "always_ask" },
-      };
-    });
-  return {
+export function buildManagedToolset(
+  form: FormState,
+  existing?: Record<string, unknown>,
+): Record<string, unknown> {
+  const priorConfigs = Array.isArray(existing?.configs)
+    ? existing.configs.filter(
+        (entry): entry is Record<string, unknown> =>
+          !!entry && typeof entry === "object" && !Array.isArray(entry),
+      )
+    : [];
+  const priorByName = new Map(
+    priorConfigs.flatMap((entry) =>
+      typeof entry.name === "string" ? [[entry.name, entry] as const] : [],
+    ),
+  );
+  const configs: Record<string, unknown>[] = [];
+
+  for (const prior of priorConfigs) {
+    const name = typeof prior.name === "string" ? prior.name : undefined;
+    if (name === undefined || !Object.hasOwn(form.toolOverrides, name)) {
+      configs.push(structuredClone(prior));
+      continue;
+    }
+    const mode = form.toolOverrides[name];
+    const next = structuredClone(prior);
+    if (mode === "default") {
+      delete next.enabled;
+      delete next.permission_policy;
+      const meaningfulKeys = Object.keys(next).filter(
+        (key) => key !== "name" && key !== "type",
+      );
+      if (meaningfulKeys.length > 0) configs.push(next);
+      continue;
+    }
+    if (mode === "disabled") {
+      next.enabled = false;
+      delete next.permission_policy;
+    } else {
+      next.enabled = true;
+      next.permission_policy = { type: mode };
+    }
+    configs.push(next);
+  }
+
+  for (const [name, mode] of Object.entries(form.toolOverrides)) {
+    if (priorByName.has(name) || mode === "default") continue;
+    configs.push(
+      mode === "disabled"
+        ? { name, enabled: false }
+        : { name, enabled: true, permission_policy: { type: mode } },
+    );
+  }
+
+  const priorDefault =
+    existing?.default_config && typeof existing.default_config === "object"
+      ? structuredClone(existing.default_config as Record<string, unknown>)
+      : {};
+  const result: Record<string, unknown> = {
+    ...(existing ? structuredClone(existing) : {}),
     type: "agent_toolset_20260401",
     default_config: {
+      ...priorDefault,
       enabled: form.toolDefaultEnabled,
       permission_policy: { type: form.toolDefaultPermission },
     },
-    ...(overrides.length > 0 ? { configs: overrides } : {}),
   };
+  if (configs.length > 0) result.configs = configs;
+  else delete result.configs;
+  return result;
 }
 
 /**
@@ -238,7 +457,17 @@ export function mergeToolsField(
   form: FormState,
 ): unknown[] {
   const existing = Array.isArray(existingTools) ? existingTools : [];
-  const result: unknown[] = [buildManagedToolset(form)];
+  const priorManagedToolset = existing.find(
+    (tool): tool is Record<string, unknown> =>
+      !!tool &&
+      typeof tool === "object" &&
+      !Array.isArray(tool) &&
+      (tool as { type?: unknown }).type === "agent_toolset_20260401",
+  );
+  const managedToolset = buildManagedToolset(form, priorManagedToolset);
+  const handledMcp = new Set<McpEntry>();
+  let handledManagedToolset = false;
+  const result: unknown[] = [];
 
   for (const tool of existing) {
     if (!tool || typeof tool !== "object") {
@@ -246,40 +475,92 @@ export function mergeToolsField(
       continue;
     }
     const type = (tool as { type?: unknown }).type;
-    if (type === "agent_toolset_20260401") continue;
-    if (type === "mcp_toolset") continue;
-    result.push(tool);
+    if (type === "agent_toolset_20260401" && !handledManagedToolset) {
+      result.push(managedToolset);
+      handledManagedToolset = true;
+      continue;
+    }
+    if (type === "mcp_toolset") {
+      const priorName = (tool as { mcp_server_name?: unknown }).mcp_server_name;
+      const mcp = form.mcpServers.find(
+        (entry) => (entry.originalName || entry.name) === priorName,
+      );
+      if (mcp === undefined || !mcp.name) continue;
+      handledMcp.add(mcp);
+      result.push({
+        ...structuredClone(tool as Record<string, unknown>),
+        mcp_server_name: mcp.name,
+      });
+      continue;
+    }
+    result.push(structuredClone(tool));
   }
 
-  for (const mcp of form.mcpServers.filter((m) => m.name)) {
-    const prior = existing.find(
-      (t) =>
-        t &&
-        typeof t === "object" &&
-        (t as { type?: unknown }).type === "mcp_toolset" &&
-        (t as { mcp_server_name?: unknown }).mcp_server_name ===
-          (mcp.originalName || mcp.name),
-    );
-    if (prior) {
-      result.push({
-        ...structuredClone(prior as Record<string, unknown>),
-        mcp_server_name: mcp.name,
-      });
-    } else {
-      result.push({
-        type: "mcp_toolset",
-        mcp_server_name: mcp.name,
-        default_config: { permission_policy: { type: "always_allow" } },
-      });
-    }
+  if (!handledManagedToolset) result.unshift(managedToolset);
+
+  for (const mcp of form.mcpServers.filter((entry) => entry.name && !handledMcp.has(entry))) {
+    result.push({
+      type: "mcp_toolset",
+      mcp_server_name: mcp.name,
+      default_config: { permission_policy: { type: "always_allow" } },
+    });
   }
 
   return result;
 }
 
+function mergeMultiagent(
+  existing: unknown,
+  callableAgents: CallableEntry[],
+): Record<string, unknown> | null {
+  const prior =
+    existing && typeof existing === "object" && !Array.isArray(existing)
+      ? (existing as Record<string, unknown>)
+      : undefined;
+  const priorRoster = Array.isArray(prior?.agents)
+    ? prior.agents.filter(
+        (entry): entry is Record<string, unknown> =>
+          !!entry && typeof entry === "object" && !Array.isArray(entry),
+      )
+    : [];
+  const requested = new Map(callableAgents.map((entry) => [entry.id, entry]));
+  const seen = new Set<string>();
+  const roster: Record<string, unknown>[] = [];
+
+  for (const member of priorRoster) {
+    if (member.type !== "agent" || typeof member.id !== "string") {
+      roster.push(structuredClone(member));
+      continue;
+    }
+    const replacement = requested.get(member.id);
+    if (replacement === undefined) continue;
+    seen.add(member.id);
+    const next = {
+      ...structuredClone(member),
+      type: "agent",
+      id: replacement.id,
+      ...(replacement.version !== undefined
+        ? { version: replacement.version }
+        : {}),
+    };
+    if (replacement.version === undefined) delete next.version;
+    roster.push(next);
+  }
+  for (const member of callableAgents) {
+    if (seen.has(member.id)) continue;
+    roster.push({ ...member });
+  }
+  if (roster.length === 0) return null;
+  return {
+    ...(prior ? structuredClone(prior) : {}),
+    type: "coordinator",
+    agents: roster,
+  };
+}
+
 /**
- * Merge form MCP rows onto existing servers by name so stdio / auth / extra
- * keys survive a name/url-only edit. Removed form rows are dropped.
+ * Merge form MCP rows onto existing servers by name while preserving unknown
+ * extension keys. Removed form rows are dropped.
  */
 export function mergeMcpServers(
   existing: unknown[] | undefined,
@@ -300,57 +581,40 @@ export function mergeMcpServers(
     .filter((m) => m.name)
     .map((m) => {
       const prior = priorByName.get(m.originalName || m.name);
-      if (!prior) {
-        return { name: m.name, type: m.type || "url", ...(m.url ? { url: m.url } : {}) };
-      }
-      const next: Record<string, unknown> = { ...prior, name: m.name, type: m.type || prior.type || "url" };
-      if (m.url) next.url = m.url;
-      else if (m.type === "stdio" && prior.stdio) {
-        // stdio-hosted servers often have no remote URL — don't invent one.
+      const next: Record<string, unknown> = {
+        ...(prior ?? {}),
+        name: m.name,
+        type: m.type,
+      };
+      if (m.type === "stdio") {
+        if (!m.command.startsWith("/")) {
+          throw new Error(`MCP stdio command for "${m.name}" must be an absolute path`);
+        }
+        const args = JSON.parse(m.argsJson || "[]") as unknown;
+        if (!Array.isArray(args) || !args.every((value) => typeof value === "string")) {
+          throw new Error(`MCP stdio args for "${m.name}" must be a JSON string array`);
+        }
+        const env = JSON.parse(m.envJson || "{}") as unknown;
+        if (
+          !env || typeof env !== "object" || Array.isArray(env)
+          || !Object.values(env).every((value) => typeof value === "string")
+        ) {
+          throw new Error(`MCP stdio env for "${m.name}" must be a JSON string map`);
+        }
         delete next.url;
-      } else if (!m.url && typeof prior.url === "string") {
-        // Keep prior url when the form left it blank (stdio / incomplete edit).
-        next.url = prior.url;
+        delete next.stdio;
+        next.command = m.command;
+        next.args = args;
+        next.env = env;
+        return next;
       }
+      delete next.command;
+      delete next.args;
+      delete next.env;
+      delete next.stdio;
+      if (m.url) next.url = m.url;
       return next;
     });
-}
-
-function buildOmaPatch(
-  form: FormState,
-  forUpdate: boolean,
-  base: Record<string, unknown> | null | undefined,
-): Record<string, unknown> | undefined {
-  const baseOma =
-    base?._oma && typeof base._oma === "object"
-      ? structuredClone(base._oma as Record<string, unknown>)
-      : {};
-  const hadBinding =
-    !!(baseOma.runtime_binding) ||
-    !!(base?.runtime_binding);
-
-  if (form.runtimeId && form.acpAgentId) {
-    return {
-      ...baseOma,
-      harness: "acp-proxy",
-      runtime_binding: {
-        runtime_id: form.runtimeId,
-        acp_agent_id: form.acpAgentId,
-        ...(form.localSkillBlocklist.length > 0
-          ? { local_skill_blocklist: form.localSkillBlocklist }
-          : {}),
-      },
-    };
-  }
-
-  if (forUpdate && hadBinding) {
-    return { ...baseOma, harness: "default", runtime_binding: null };
-  }
-
-  // Preserve untouched _oma (aux_model, appendable_prompts, …) on update /
-  // mode switches even when the form does not manage a runtime binding.
-  if (Object.keys(baseOma).length > 0) return baseOma;
-  return undefined;
 }
 
 /**
@@ -374,10 +638,66 @@ export function mergeFormIntoConfig(
 
   // Drop response-ish keys if a caller passed a full agent record.
   for (const k of RESPONSE_ONLY_KEYS) delete payload[k];
+  for (const k of OMA_ONLY_KEYS) delete payload[k];
 
   payload.name = form.name;
-  payload.model = buildModelValue(form);
+  payload.model = buildModelValue(form, base?.model);
   payload.tools = mergeToolsField(existingTools, form);
+  const metadata = parseMetadataJson(form.metadataJson);
+  if (forUpdate) {
+    const currentMetadata =
+      base?.metadata &&
+      typeof base.metadata === "object" &&
+      !Array.isArray(base.metadata)
+        ? (base.metadata as Record<string, string>)
+        : {};
+    const patch = metadataPatch(currentMetadata, metadata);
+    if (Object.keys(patch).length > 0) payload.metadata = patch;
+    else delete payload.metadata;
+  } else if (Object.keys(metadata).length > 0) {
+    payload.metadata = metadata;
+  } else {
+    delete payload.metadata;
+  }
+
+  const existingOpenMa =
+    base?._oma && typeof base._oma === "object"
+      ? (base._oma as Record<string, unknown>)
+      : undefined;
+  const openma: Record<string, unknown> = existingOpenMa
+    ? structuredClone(existingOpenMa)
+    : {};
+  if (form.auxiliaryModel) {
+    const priorAuxiliary =
+      existingOpenMa?.aux_model &&
+      typeof existingOpenMa.aux_model === "object" &&
+      modelIdOf(existingOpenMa.aux_model) === form.auxiliaryModel
+        ? structuredClone(existingOpenMa.aux_model as Record<string, unknown>)
+        : {};
+    openma.aux_model = {
+      ...priorAuxiliary,
+      id: form.auxiliaryModel,
+      ...(form.auxiliaryModelSpeed
+        ? { speed: form.auxiliaryModelSpeed }
+        : {}),
+    };
+    if (!form.auxiliaryModelSpeed) {
+      delete (openma.aux_model as Record<string, unknown>).speed;
+    }
+  } else if (forUpdate && existingOpenMa?.aux_model !== undefined) {
+    openma.aux_model = null;
+  } else {
+    delete openma.aux_model;
+  }
+  if (form.appendablePrompts.length > 0) {
+    openma.appendable_prompts = form.appendablePrompts;
+  } else if (forUpdate && existingOpenMa?.appendable_prompts !== undefined) {
+    openma.appendable_prompts = [];
+  } else {
+    delete openma.appendable_prompts;
+  }
+  if (Object.keys(openma).length > 0) payload._oma = openma;
+  else delete payload._oma;
 
   if (forUpdate) {
     payload.system = form.system || null;
@@ -386,10 +706,7 @@ export function mergeFormIntoConfig(
       ? mergeMcpServers(existingMcp, form.mcpServers)
       : null;
     payload.skills = form.skills.length ? form.skills : null;
-    payload.multiagent = form.callableAgents.length
-      ? { type: "coordinator", agents: form.callableAgents }
-      : null;
-    payload.enable_general_subagent = form.enableGeneralSubagent;
+    payload.multiagent = mergeMultiagent(base?.multiagent, form.callableAgents);
   } else {
     if (form.system) payload.system = form.system;
     else delete payload.system;
@@ -402,56 +719,13 @@ export function mergeFormIntoConfig(
     }
     if (form.skills.length) payload.skills = form.skills;
     else delete payload.skills;
-    if (form.callableAgents.length) {
-      payload.multiagent = { type: "coordinator", agents: form.callableAgents };
+    const multiagent = mergeMultiagent(base?.multiagent, form.callableAgents);
+    if (multiagent !== null) {
+      payload.multiagent = multiagent;
     } else {
       delete payload.multiagent;
     }
-    if (form.enableGeneralSubagent) payload.enable_general_subagent = true;
-    else delete payload.enable_general_subagent;
-  }
-
-  const oma = buildOmaPatch(form, forUpdate, base);
-  if (oma) payload._oma = oma;
-  else if (forUpdate) {
-    // Leave existing _oma alone when base had none and form cleared nothing.
-    delete payload._oma;
-  } else {
-    delete payload._oma;
   }
 
   return payload;
-}
-
-/**
- * Keep the standard Managed Agents endpoint strict. OpenMA-only runtime,
- * harness and local-process fields are routed through the explicit product
- * namespace instead of being smuggled into `/v1/agents`.
- */
-export function requiresOmaAgentEndpoint(payload: Record<string, unknown>): boolean {
-  const omaOnlyKeys = [
-    "_oma",
-    "runtime_binding",
-    "harness",
-    "acp",
-    "aux_model",
-    "appendable_prompts",
-    "enable_general_subagent",
-    "callable_agents",
-  ];
-  if (omaOnlyKeys.some((key) => Object.prototype.hasOwnProperty.call(payload, key))) {
-    return true;
-  }
-
-  const servers = payload.mcp_servers;
-  return (
-    Array.isArray(servers) &&
-    servers.some(
-      (server) =>
-        !!server &&
-        typeof server === "object" &&
-        ((server as { type?: unknown }).type !== "url" ||
-          Object.prototype.hasOwnProperty.call(server, "stdio")),
-    )
-  );
 }

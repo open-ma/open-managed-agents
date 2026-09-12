@@ -9,16 +9,11 @@ import {
 } from "../../apps/agent/src/harness/compaction";
 import type { SessionEvent } from "@open-managed-agents/shared";
 
-// Mock ai-sdk's generateText so iterative-compaction tests can drive the
-// strategy's full code path without hitting a real LLM. Spread original
-// exports so tools(), z, etc. still work.
-vi.mock("ai", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("ai")>();
-  return {
-    ...orig,
-    generateText: vi.fn(),
-  };
-});
+// This unit only exercises compaction, whose sole runtime import from `ai` is
+// generateText. Keep the mock self-contained: importOriginal() asks the
+// Workers pool to re-import Vite's optimized URL, a module-resolution path
+// workerd does not support reliably.
+vi.mock("ai", () => ({ generateText: vi.fn() }));
 
 import { generateText } from "ai";
 
@@ -341,6 +336,24 @@ describe("DefaultHarness.compact() — empty-summary defense (upstream)", () => 
     await harness.compact([], runtime, ctx);
     expect(broadcasts).toHaveLength(0);
   });
+
+  it("threads the Agent model provider options into the compaction request", async () => {
+    const compact = vi.fn(async () => null);
+    const fake = {
+      name: "capture-provider-options",
+      shouldCompact: () => true,
+      compact,
+    } as CompactionStrategy;
+    const { harness, runtime } = buildHarnessWithStrategy(fake) as any;
+    const providerOptions = { anthropic: { thinking: { type: "disabled" } } };
+
+    await harness.compact([], runtime, { ...ctx, providerOptions });
+
+    expect(compact).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ providerOptions }),
+    );
+  });
 });
 
 // ============================================================
@@ -385,6 +398,7 @@ describe("iterative compaction (mocked generateText)", () => {
     contextWindowTokens: 1_000_000,
     systemPrompt: "main-agent-system",
     tools: { bash: {} },
+    providerOptions: { anthropic: { thinking: { type: "disabled" } } },
     applyCacheStrategy: (sys: string, tools: any, msgs: any[]) => ({ system: sys, tools, messages: msgs }),
   };
 
@@ -474,6 +488,7 @@ describe("iterative compaction (mocked generateText)", () => {
       expect(call.tools).toBeUndefined();
       // No toolChoice passed.
       expect(call.toolChoice).toBeUndefined();
+      expect(call.providerOptions).toEqual(stubArgs.providerOptions);
     });
   }
 });

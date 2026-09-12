@@ -4,11 +4,24 @@ export type AgentPermissionPolicy =
   | { type: "always_allow" }
   | { type: "always_ask" };
 
-export interface AgentMcpServerInput {
+export interface AgentUrlMcpServerInput {
   name: string;
   type: "url";
   url: string;
 }
+
+/** OpenMA extension: a standard MCP stdio process launched by the sandbox Agent. */
+export interface AgentStdioMcpServerInput {
+  name: string;
+  type: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export type AgentMcpServerInput =
+  | AgentUrlMcpServerInput
+  | AgentStdioMcpServerInput;
 
 export type AgentSkillInput =
   | {
@@ -108,11 +121,21 @@ export type AgentToolInput =
   | AgentMcpToolsetInput
   | AgentCustomToolInput;
 
-export interface AgentMcpServer {
+export interface AgentUrlMcpServer {
   name: string;
   type: "url";
   url: string;
 }
+
+export interface AgentStdioMcpServer {
+  name: string;
+  type: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export type AgentMcpServer = AgentUrlMcpServer | AgentStdioMcpServer;
 
 export type AgentSkill =
   | { skillId: string; type: "anthropic"; version: string }

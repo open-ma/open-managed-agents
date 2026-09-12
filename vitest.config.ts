@@ -1,7 +1,30 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { cloudflarePool, cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import type { Plugin } from "vite";
+
+const requireFromConfig = createRequire(import.meta.url);
+const requireFromBashParser = createRequire(requireFromConfig.resolve("bash-parser"));
+const bashParserLegacyAliases = [
+  {
+    find: "fs",
+    replacement: fileURLToPath(new URL("./test/stubs/bash-parser-fs.ts", import.meta.url)),
+  },
+  {
+    find: "path",
+    replacement: fileURLToPath(new URL("./test/stubs/bash-parser-path.ts", import.meta.url)),
+  },
+  {
+    find: "iterable-transform-replace",
+    replacement: requireFromBashParser.resolve("iterable-transform-replace"),
+  },
+  {
+    find: "transform-spread-iterable",
+    replacement: requireFromBashParser.resolve("transform-spread-iterable"),
+  },
+];
 
 const packagesWithUnpublishedSourcemapSources = [
   "/node_modules/.pnpm/@workflow+serde@",
@@ -67,6 +90,9 @@ export default defineConfig({
     // workspace package + subpath that workerd-side test code imports
     // needs an explicit string alias here.
     alias: [
+      // bash-parser's 2017-era transitive packages publish stale
+      // `jsnext:main` fields. Point Vite at the files Node actually loads.
+      ...bashParserLegacyAliases,
       // Stub out @cloudflare/sandbox in tests — the real module depends on
       // @cloudflare/containers which has workerd-native code that miniflare
       // can't load. Production builds use wrangler bundling which handles this.
@@ -108,6 +134,7 @@ export default defineConfig({
       { find: "@open-managed-agents/services", replacement: "./packages/services/src/index.ts" },
 
       // ─── sql-client ───────────────────────────────────────────────────
+      { find: "@open-managed-agents/sql-client/adapters/cf-do", replacement: "./packages/sql-client/src/adapters/cf-do.ts" },
       { find: "@open-managed-agents/sql-client/adapters/cf-d1", replacement: "./packages/sql-client/src/adapters/cf-d1.ts" },
       { find: "@open-managed-agents/sql-client", replacement: "./packages/sql-client/src/index.ts" },
 
@@ -181,12 +208,14 @@ export default defineConfig({
       { find: "@open-managed-agents/vault-store-memory", replacement: "./packages/vault-store-memory/src/index.ts" },
       { find: "@open-managed-agents/vault-store", replacement: "./packages/vault-store/src/index.ts" },
       { find: "@open-managed-agents/session-runtime-contract/context", replacement: "./packages/session-runtime-contract/src/context.ts" },
+      { find: "@open-managed-agents/session-runtime-contract/coordination", replacement: "./packages/session-runtime-contract/src/coordination.ts" },
       { find: "@open-managed-agents/session-runtime-contract/dispatch", replacement: "./packages/session-runtime-contract/src/dispatch.ts" },
       { find: "@open-managed-agents/session-runtime-contract/history", replacement: "./packages/session-runtime-contract/src/history.ts" },
       { find: "@open-managed-agents/session-runtime-contract/lifecycle", replacement: "./packages/session-runtime-contract/src/lifecycle.ts" },
       { find: "@open-managed-agents/session-runtime-contract/stream", replacement: "./packages/session-runtime-contract/src/stream.ts" },
       { find: "@open-managed-agents/session-runtime-contract", replacement: "./packages/session-runtime-contract/src/index.ts" },
       { find: "@open-managed-agents/session-runtime-sql/context", replacement: "./packages/session-runtime-sql/src/context.ts" },
+      { find: "@open-managed-agents/session-runtime-sql/coordination", replacement: "./packages/session-runtime-sql/src/coordination.ts" },
       { find: "@open-managed-agents/session-runtime-sql/history", replacement: "./packages/session-runtime-sql/src/history.ts" },
       { find: "@open-managed-agents/session-runtime-sql", replacement: "./packages/session-runtime-sql/src/index.ts" },
       { find: "@open-managed-agents/session-realtime", replacement: "./packages/session-realtime/src/index.ts" },
@@ -252,14 +281,30 @@ export default defineConfig({
       // ─── sandbox (subpaths) + blob-store ──────────────────────────────
       { find: "@open-managed-agents/sandbox/orchestrator", replacement: "./packages/sandbox/src/orchestrator.ts" },
       { find: "@open-managed-agents/sandbox/adapters/local-subprocess", replacement: "./packages/sandbox/src/adapters/local-subprocess.ts" },
-      { find: "@open-managed-agents/sandbox/adapters/litebox", replacement: "./packages/sandbox/src/adapters/litebox.ts" },
-      { find: "@open-managed-agents/sandbox/adapters/daytona", replacement: "./packages/sandbox/src/adapters/daytona.ts" },
-      { find: "@open-managed-agents/sandbox/adapters/e2b", replacement: "./packages/sandbox/src/adapters/e2b.ts" },
-      { find: "@open-managed-agents/sandbox/adapters/boxrun", replacement: "./packages/sandbox/src/adapters/boxrun.ts" },
+      { find: "@open-managed-agents/sandbox-adapter-litebox", replacement: "./packages/sandbox-adapter-litebox/src/index.ts" },
+      { find: "@open-managed-agents/sandbox-adapter-daytona", replacement: "./packages/sandbox-adapter-daytona/src/index.ts" },
+      { find: "@open-managed-agents/sandbox-adapter-e2b", replacement: "./packages/sandbox-adapter-e2b/src/index.ts" },
+      { find: "@open-managed-agents/sandbox-adapter-boxrun", replacement: "./packages/sandbox-adapter-boxrun/src/index.ts" },
       { find: "@open-managed-agents/sandbox", replacement: "./packages/sandbox/src/index.ts" },
+      { find: "@open-managed-agents/runtime-resource-contract", replacement: "./packages/runtime-resource-contract/src/index.ts" },
+      { find: "@open-managed-agents/runtime-resource-fence-sql", replacement: "./packages/runtime-resource-fence-sql/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-host", replacement: "./packages/managed-runtime-host/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-cloudflare-bridge", replacement: "./packages/managed-runtime-cloudflare-bridge/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-cloudflare", replacement: "./packages/managed-runtime-cloudflare/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-blaxel", replacement: "./packages/managed-runtime-blaxel/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-boxlite", replacement: "./packages/managed-runtime-boxlite/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-sprites", replacement: "./packages/managed-runtime-sprites/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-vercel", replacement: "./packages/managed-runtime-vercel/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-modal", replacement: "./packages/managed-runtime-modal/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-superserve", replacement: "./packages/managed-runtime-superserve/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-daytona", replacement: "./packages/managed-runtime-daytona/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-e2b", replacement: "./packages/managed-runtime-e2b/src/index.ts" },
+      { find: "@open-managed-agents/managed-runtime-sandbox", replacement: "./packages/managed-runtime-sandbox/src/index.ts" },
       { find: "@open-managed-agents/blob-store/adapters/local-fs", replacement: "./packages/blob-store/src/adapters/local-fs.ts" },
       { find: "@open-managed-agents/blob-store/adapters/s3", replacement: "./packages/blob-store/src/adapters/s3.ts" },
       { find: "@open-managed-agents/blob-store/adapters/in-memory", replacement: "./packages/blob-store/src/adapters/in-memory.ts" },
+      { find: "@open-managed-agents/blob-store/adapters/cf-r2", replacement: "./packages/blob-store/src/adapters/cf-r2.ts" },
+      { find: "@open-managed-agents/blob-store/ports", replacement: "./packages/blob-store/src/ports.ts" },
       { find: "@open-managed-agents/blob-store", replacement: "./packages/blob-store/src/index.ts" },
 
       // ─── auth / auth-config / email / kv-store / quotas / rate-limit / vault-forward / schema / http-routes / install-bridge ─
@@ -289,7 +334,9 @@ export default defineConfig({
       { find: "@open-managed-agents/session-runtime", replacement: "./packages/session-runtime/src/index.ts" },
       { find: "@open-managed-agents/acp-runtime/cf-sandbox", replacement: "./packages/acp-runtime/src/cf-sandbox.ts" },
       { find: "@open-managed-agents/acp-runtime/known-agents", replacement: "./packages/acp-runtime/src/known-agents.ts" },
+      { find: "@open-managed-agents/acp-runtime/native-state", replacement: "./packages/acp-runtime/src/native-state.ts" },
       { find: "@open-managed-agents/acp-runtime/placement", replacement: "./packages/acp-runtime/src/placement.ts" },
+      { find: "@open-managed-agents/acp-runtime/sandbox-agent", replacement: "./packages/acp-runtime/src/sandbox-agent.ts" },
       { find: "@open-managed-agents/acp-runtime/sandbox-spawner", replacement: "./packages/acp-runtime/src/spawners/sandbox.ts" },
       { find: "@open-managed-agents/acp-runtime/node-spawner", replacement: "./packages/acp-runtime/src/node-spawner.ts" },
       { find: "@open-managed-agents/acp-runtime/registry", replacement: "./packages/acp-runtime/src/registry.ts" },
@@ -332,6 +379,30 @@ export default defineConfig({
   test: {
     testTimeout: 30000,
     hookTimeout: 30000,
+    // bash-parser is an old CommonJS package with extensionless transitive
+    // requires. workerd's module loader cannot resolve that shape directly,
+    // so pre-bundle the complete package instead of relying on whichever
+    // dependencies happen to be hoisted into the workspace root.
+    deps: {
+      optimizer: {
+        ssr: {
+          enabled: true,
+          include: ["bash-parser"],
+          // Keep vi.mock(importOriginal) on Vite's normal module path. The
+          // Workers pool cannot currently re-import an optimized `ai` URL
+          // after appending its cache-busting query string.
+          exclude: ["ai"],
+          esbuildOptions: {
+            // Several bash-parser transitive packages publish a stale
+            // `jsnext:main` pointing at an omitted source file. Prefer their
+            // shipped CommonJS entry, and leave Node built-ins to workerd's
+            // nodejs_compat layer.
+            mainFields: ["browser", "module", "main"],
+            platform: "node",
+          },
+        },
+      },
+    },
     // Each file owns a workerd/miniflare runtime. Letting Vitest scale to all
     // host CPUs exhausts the local runtime and turns trivial requests into
     // exact 30s timeouts; two workers keeps the suite deterministic on local
@@ -342,10 +413,27 @@ export default defineConfig({
       "**/.git/**",
       "**/.claude/worktrees/**",
       "**/.pnpm-store/**",
+      // This is a node:test architecture suite and is run explicitly by
+      // test:architecture, not inside workerd/Vitest.
+      "scripts/provider-package-boundaries.test.mjs",
+      "scripts/migration-compatibility.test.mjs",
+      "scripts/setup-cf.test.mjs",
+      "scripts/setup-fly.test.mjs",
+      // Credential certification orchestrates real Node child processes and
+      // is run explicitly by test:certification:runner.
+      "scripts/live-certification.test.mjs",
+      "scripts/offline-certification.test.mjs",
+      "scripts/local-release-certification.test.mjs",
+      "scripts/deepseek-live-certification.test.mjs",
+      "scripts/harness-in-sandbox-live-certification.test.mjs",
       "test/e2e/**",
+      "**/.vercel/**",
       "apps/agent/build-*/**",
       "apps/console/**",
       "apps/main-node/**",
+      "apps/main-fly/**",
+      "apps/main-vercel/**",
+      "packages/auth/**",
       "packages/acp-runtime/**",
       "packages/cli/**",
       "packages/cap/test/**",
@@ -355,6 +443,36 @@ export default defineConfig({
       "packages/managed-agents-adapters-sql/test/**",
       "packages/managed-agents-adapters-runtime/test/**",
       "packages/managed-agents-runtime/**",
+      "packages/openai-agents-api/**",
+      "packages/openai-agents-compat/**",
+      "packages/openai-agents-sdk-audit/**",
+      "packages/managed-runtime-host/**",
+      "packages/managed-runtime-node/**",
+      "packages/managed-runtime-cloudflare-bridge/**",
+      "packages/managed-runtime-cloudflare/**",
+      "packages/managed-runtime-blaxel/**",
+      "packages/managed-runtime-boxlite/**",
+      "packages/managed-runtime-sprites/**",
+      "packages/managed-runtime-vercel/**",
+      "packages/managed-runtime-modal/**",
+      "packages/managed-runtime-superserve/**",
+      "packages/managed-runtime-daytona/**",
+      "packages/managed-runtime-e2b/**",
+      "packages/managed-runtime-sandbox/**",
+      // Provider activation/dispatch packages and their SQL intent store run
+      // in their own Node Vitest projects. In particular, better-sqlite3 may
+      // not be loaded by the workerd pool used by this root project.
+      "packages/environment-activation-*/**",
+      "packages/environment-dispatch-*/**",
+      "packages/sandbox-adapter-boxrun/**",
+      "packages/sandbox-adapter-daytona/**",
+      "packages/sandbox-adapter-e2b/**",
+      "packages/sandbox-adapter-litebox/**",
+      "packages/harness-supervisor/**",
+      "packages/harness-runtime-acp/**",
+      "packages/runtime-resource-fence-sql/**",
+      "packages/session-runtime-sql/test/**",
+      "packages/managed-agents-api/test/official-environment-worker.contract.test.ts",
       "packages/sandbox/test/**",
       "packages/agent-store-sql/test/**",
       "packages/credential-store-sql/test/**",

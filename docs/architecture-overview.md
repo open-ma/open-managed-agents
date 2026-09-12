@@ -183,7 +183,6 @@ open-managed-agents/
 | `runtime/recovery.ts` | DO crash 后扫描 in-flight 流，发 `session.warning` |
 | `runtime/resource-mounter.ts` | 把 file/github_repo/memory_store 资源挂载到容器 |
 | `runtime/workspace-backups.ts` | 用 `@cloudflare/sandbox createBackup` 把 workspace 打包到 R2 |
-| `runtime/mcp-spawner.ts` | 在容器内拉起 MCP 子进程，建立 stdio 通道 |
 | `runtime/appendable-prompts.ts` | 系统提示词的可追加片段（skills 用） |
 | `harness/interface.ts` | `HarnessInterface`、`HarnessContext` 契约 |
 | `harness/registry.ts` | 名字 → 工厂 |

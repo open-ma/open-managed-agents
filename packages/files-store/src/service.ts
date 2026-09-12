@@ -107,16 +107,16 @@ export class FileService {
   }
 
   /**
-   * Cascade-delete every file scoped to a session. Returns the deleted rows
-   * so the caller can DELETE each from R2. Currently no caller — the
-   * session-delete route does NOT cascade scoped files (potential leak
-   * tracked in OPE follow-ups). Exposed here so the integration step or a
-   * future cleanup job can call it without needing more service surface.
+   * Cascade-delete every file scoped to a session in one tenant. Returns the
+   * deleted rows so the caller can DELETE each from R2. Tenant scoping is
+   * intentional: session IDs are opaque inputs and must never be treated as
+   * globally unique by a storage adapter.
    */
   async deleteBySession(opts: {
+    tenantId: string;
     sessionId: string;
   }): Promise<FileRow[]> {
-    return this.repo.deleteBySession(opts.sessionId);
+    return this.repo.deleteBySession(opts.tenantId, opts.sessionId);
   }
 
   // ============================================================

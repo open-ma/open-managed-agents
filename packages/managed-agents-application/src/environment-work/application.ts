@@ -19,6 +19,7 @@ import type {
 } from "../ports/environment-work";
 import type { EnvironmentWorkAvailabilityWaiterPort } from "./availability-waiter";
 import type { EnvironmentWorkEnvironmentSourcePort } from "./environment-source";
+import type { EnvironmentWorkSessionCredentialIssuerPort } from "./credential-issuer";
 import type {
   EnvironmentWorkStore,
   EnvironmentWorkRecord,
@@ -29,6 +30,7 @@ import type {
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_RECLAIM_MILLISECONDS = 5_000;
+const DEFAULT_HEARTBEAT_TTL_SECONDS = 90;
 
 function encodeCursorPart(value: string): string {
   return btoa(encodeURIComponent(value))
@@ -131,6 +133,7 @@ export interface EnvironmentWorkApplicationServiceDependencies {
   environments: EnvironmentWorkEnvironmentSourcePort;
   store: EnvironmentWorkStore;
   availability: EnvironmentWorkAvailabilityWaiterPort;
+  credentials: EnvironmentWorkSessionCredentialIssuerPort;
   clock: { now(): Date };
 }
 
@@ -234,6 +237,7 @@ export class EnvironmentWorkApplicationService
         message: `Work ${command.workId} is not a claimed queued item`,
       };
     }
+    const acknowledgedAt = this.dependencies.clock.now().toISOString();
     const replaced = await this.dependencies.store.replace({
       workspaceId: this.dependencies.workspaceId,
       environmentId: command.environmentId,
@@ -241,10 +245,13 @@ export class EnvironmentWorkApplicationService
       expectedRevision: current.revision,
       next: {
         ...recordWithoutRevision(current),
-        claim: null,
+        claim: {
+          ...current.claim,
+          claimedAt: acknowledgedAt,
+        },
         work: {
           ...current.work,
-          acknowledgedAt: this.dependencies.clock.now().toISOString(),
+          acknowledgedAt,
           state: "starting",
         },
       },
@@ -268,6 +275,18 @@ export class EnvironmentWorkApplicationService
       workId: command.workId,
     });
     if (current === null) return { type: "not_found" };
+    const now = this.dependencies.clock.now();
+    const leaseHasExpired =
+      (current.work.state === "starting" || current.work.state === "active") &&
+      current.claim !== null &&
+      Date.parse(current.claim.claimedAt) + current.heartbeatTtlSeconds * 1_000 <=
+        now.getTime();
+    if (leaseHasExpired) {
+      return {
+        type: "precondition_failed",
+        message: `Work ${command.workId} heartbeat lease has expired`,
+      };
+    }
     const expected = command.expectedLastHeartbeat;
     const expectationMatches =
       expected == null ||
@@ -286,7 +305,7 @@ export class EnvironmentWorkApplicationService
         message: `Work ${command.workId} must be acknowledged before heartbeating`,
       };
     }
-    const timestamp = this.dependencies.clock.now().toISOString();
+    const timestamp = now.toISOString();
     const ttlSeconds = command.desiredTtlSeconds ?? current.heartbeatTtlSeconds;
     const leaseExtended =
       current.work.state === "starting" || current.work.state === "active";
@@ -299,6 +318,13 @@ export class EnvironmentWorkApplicationService
       expectedRevision: current.revision,
       next: {
         ...recordWithoutRevision(current),
+        ...(leaseExtended && {
+          claim: {
+            claimedAt: timestamp,
+            workerId: current.claim?.workerId ?? null,
+            generation: current.claim?.generation ?? 0,
+          },
+        }),
         heartbeatTtlSeconds: ttlSeconds,
         work: {
           ...current.work,
@@ -350,6 +376,7 @@ export class EnvironmentWorkApplicationService
         claimedAt,
         reclaimBefore: new Date(now.getTime() - reclaimMilliseconds).toISOString(),
         workerId: query.workerId ?? null,
+        heartbeatTtlSeconds: DEFAULT_HEARTBEAT_TTL_SECONDS,
       });
     let result = await claim();
     const blockMilliseconds = query.blockMilliseconds ?? 0;
@@ -361,9 +388,31 @@ export class EnvironmentWorkApplicationService
       });
       result = await claim();
     }
-    return result.type === "empty"
-      ? { type: "empty" }
-      : { type: "work", work: view(result.record, true) };
+    if (result.type === "empty") return { type: "empty" };
+    if (result.record.claim === null) {
+      throw new Error("Claimed Environment Work is missing its ownership claim");
+    }
+    const bound = await this.dependencies.credentials.bindToClaim({
+      secret: result.record.secret,
+      claimedAt: result.record.claim.claimedAt,
+      generation: result.record.claim.generation,
+    });
+    const replaced = await this.dependencies.store.replace({
+      workspaceId: this.dependencies.workspaceId,
+      environmentId: query.environmentId,
+      workId: result.record.work.id,
+      expectedRevision: result.record.revision,
+      next: {
+        ...recordWithoutRevision(result.record),
+        secret: bound.secret,
+      },
+    });
+    if (replaced.type !== "replaced") {
+      throw new Error(
+        `Environment Work claim credential binding lost revision ${result.record.revision}`,
+      );
+    }
+    return { type: "work", work: view(replaced.record, true) };
   }
 
   async getEnvironmentWorkQueueStats(

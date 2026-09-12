@@ -169,7 +169,9 @@ Auth modes — credentials never enter the sandbox:
 | vault static bearer | matching `auth.type: "static_bearer"` credential in a session vault (matched by `mcp_server_url` host) |
 | vault OAuth | matching `auth.type: "mcp_oauth"` credential — refreshes on 401 **and 403** (Airtable/Asana/Sentry use 403 for expired tokens), CAS-writes new token to D1, retries once |
 
-stdio MCP servers run **inside the sandbox container**: set `type: "stdio"` with `command`, `args`, `port`. OMA spawns the process, waits for the port to bind, proxies the existing tool wiring at it. Tool discovery is bounded at 15 s per server; up to 20 servers per agent.
+Host-side OpenMA harnesses support URL-based MCP servers. Standard `stdio` (`command`, `args`, `env`) is accepted when an external Worker or harness running inside the sandbox owns the child process and speaks MCP over stdin/stdout. There is no localhost HTTP conversion. Harness-out-of-sandbox runtimes reject stdio explicitly. Tool discovery is bounded at 15 s per URL server; up to 20 servers per agent.
+
+`stdio` does not install anything. Its `command` must already exist in the selected Environment, and the Environment owns every supporting package and system dependency. OpenMA-managed base Environments guarantee Node.js/npm (`npx`) and uv (`uvx`) regardless of the sandbox provider; each embedded provider adapter is responsible for launching the equivalent OpenMA image, template, or snapshot. Extra tools belong in the Environment package list or image. BYO images and external Workers must provide their own runtime contents. A missing executable is reported as an MCP startup failure.
 
 ## Where to go next
 

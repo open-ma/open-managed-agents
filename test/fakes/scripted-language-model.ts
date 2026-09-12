@@ -109,12 +109,14 @@ export function createScriptedLanguageModel(
   options: { provider?: string; modelId?: string } = {},
 ) {
   const script = [...steps];
+  const calls: unknown[] = [];
   const totalSteps = script.length;
   let callIndex = 0;
   const model = new MockLanguageModelV3({
     provider: options.provider ?? "openma-scripted-fake",
     modelId: options.modelId ?? "scripted-language-model",
-    doStream: async () => {
+    doStream: async (options) => {
+      calls.push(options);
       const step = script.shift();
       callIndex += 1;
       if (!step) {
@@ -127,6 +129,9 @@ export function createScriptedLanguageModel(
 
   return {
     model,
+    get calls() {
+      return calls;
+    },
     get callCount() {
       return callIndex;
     },

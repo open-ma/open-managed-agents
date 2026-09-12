@@ -17,6 +17,7 @@ import {
 } from "../src";
 import { getStorageIntegrationConfig } from "../../../test/storage-integration.js";
 import { sessionStorePortContract } from "./contracts/store-port-contracts";
+import { ensureSessionExecutionCoordinatorSchema } from "@open-managed-agents/session-runtime-sql/coordination";
 
 const PG_URL = getStorageIntegrationConfig().postgres.sessionsSql;
 const WORKSPACE_ID = "managed_sessions_adapter_pg_contract";
@@ -86,6 +87,7 @@ function assertLocalTestDatabase(url: string): void {
 
 async function cleanup(): Promise<void> {
   for (const table of [
+    "managed_session_executions",
     "managed_session_events",
     "managed_session_threads",
     "managed_session_resource_secrets",
@@ -175,6 +177,7 @@ beforeAll(async () => {
       PRIMARY KEY (workspace_id, session_id, resource_id)
     );
   `);
+  await ensureSessionExecutionCoordinatorSchema(client);
   await cleanup();
 });
 
@@ -184,6 +187,67 @@ afterAll(async () => {
 });
 
 describe("Managed Sessions SQL adapters on PostgreSQL", () => {
+  it("has one atomic winner when event acceptance transactions race", async () => {
+    const sessions = new SqlSessionPersistence(client, {
+      seal: async (value) => `sealed:${value}`,
+    });
+    await sessions.insert({
+      workspaceId: WORKSPACE_ID,
+      session,
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    const contenderConnections = [
+      postgres(PG_URL, { max: 1 }),
+      postgres(PG_URL, { max: 1 }),
+    ];
+    const contenders = contenderConnections.map((candidate) =>
+      new PostgresSqlClient(
+        candidate as unknown as ConstructorParameters<typeof PostgresSqlClient>[0],
+      )
+    );
+    const events = ["alpha", "beta"].map((name): SentSessionEvent => ({
+      id: `event_pg_race_${name}`,
+      type: "user.message",
+      content: [{ type: "text", text: name }],
+      processedAt: "2026-08-26T00:10:00.000Z",
+    }));
+    try {
+      const results = await Promise.all(contenders.map((contender, index) =>
+        new SqlSessionEventPersistence(contender, { executionOutbox: true })
+          .append({
+            workspaceId: WORKSPACE_ID,
+            sessionId: session.id,
+            expectedRevision: 1,
+            events: [events[index]!],
+            nextSession: {
+              ...session,
+              updatedAt: "2026-08-26T00:10:00.000Z",
+            },
+          })
+      ));
+      expect(results.filter((result) => result.type === "appended")).toHaveLength(1);
+      expect(results.filter((result) => result.type === "revision_conflict"))
+        .toHaveLength(1);
+
+      const acceptedEvents = await client.prepare(
+        `SELECT id FROM managed_session_events
+          WHERE workspace_id = ? AND session_id = ?`,
+      ).bind(WORKSPACE_ID, session.id).all<{ id: string }>();
+      const acceptedExecutions = await client.prepare(
+        `SELECT id FROM managed_session_executions
+          WHERE workspace_id = ? AND session_id = ?`,
+      ).bind(WORKSPACE_ID, session.id).all<{ id: string }>();
+      expect(acceptedEvents.results).toHaveLength(1);
+      expect(acceptedExecutions.results).toEqual(acceptedEvents.results);
+    } finally {
+      await Promise.all(contenderConnections.map((candidate) =>
+        candidate.end({ timeout: 5 })
+      ));
+      await cleanup();
+    }
+  });
+
   it("preserves Session, Event, resource-secret CAS, and deletion semantics", async () => {
     const sealer = { seal: async (value: string) => `sealed:${value}` };
     const sessions = new SqlSessionPersistence(client, sealer);

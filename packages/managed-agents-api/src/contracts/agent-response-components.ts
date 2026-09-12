@@ -5,15 +5,9 @@ import type {
   BetaManagedAgentsAnthropicSkill,
   BetaManagedAgentsCustomSkill,
   BetaManagedAgentsCustomTool,
-  BetaManagedAgentsMCPServerURLDefinition,
   BetaManagedAgentsMCPToolset,
   BetaManagedAgentsModelConfig,
-  BetaManagedAgentsSessionThreadAgent,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
-import type {
-  BetaManagedAgentsSessionAgent,
-  BetaManagedAgentsSessionMultiagentCoordinator,
-} from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
 import { z } from "zod";
 
 const permissionPolicySchema = z.discriminatedUnion("type", [
@@ -132,12 +126,24 @@ export const agentToolResponseSchema = z.union([
 ]);
 
 export const agentMcpServerResponseSchema = z
-  .object({
-    name: z.string(),
-    type: z.literal("url"),
-    url: z.string(),
-  })
-  .strict() satisfies z.ZodType<BetaManagedAgentsMCPServerURLDefinition>;
+  .discriminatedUnion("type", [
+    z
+      .object({
+        name: z.string(),
+        type: z.literal("url"),
+        url: z.string(),
+      })
+      .strict(),
+    z
+      .object({
+        name: z.string(),
+        type: z.literal("stdio"),
+        command: z.string().startsWith("/"),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string(), z.string()).optional(),
+      })
+      .strict(),
+  ]);
 
 export const agentModelResponseSchema = z
   .object({
@@ -147,9 +153,52 @@ export const agentModelResponseSchema = z
       .strict()
       .optional(),
     inference_geo: z.string().optional(),
+    provider_options: z.record(z.string(), z.json()).optional(),
     speed: z.enum(["standard", "fast"]).optional(),
   })
   .strict() satisfies z.ZodType<BetaManagedAgentsModelConfig>;
+
+const openMaAgentAcpResponseSchema = z
+  .object({
+    agent: z
+      .object({
+        id: z.string().min(1).optional(),
+        command: z.string().min(1),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string(), z.string()).optional(),
+        cwd: z.string().min(1).optional(),
+      })
+      .strict(),
+    restart: z
+      .object({
+        mode: z.enum(["never", "on-crash", "always"]),
+        max_restarts: z.number().int().min(0).optional(),
+        window_ms: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    idle_timeout_ms: z.number().int().positive().optional(),
+    per_turn_timeout_ms: z.number().int().positive().optional(),
+  })
+  .strict();
+
+export const openMaAgentExtensionResponseSchema = z
+  .object({
+    aux_model: agentModelResponseSchema.optional(),
+    appendable_prompts: z.array(z.string().min(1)).optional(),
+    harness: z.string().min(1).optional(),
+    acp: openMaAgentAcpResponseSchema.optional(),
+    runtime_binding: z
+      .object({
+        runtime_id: z.string().min(1),
+        acp_agent_id: z.string().min(1),
+        local_skill_blocklist: z.array(z.string().min(1)).optional(),
+      })
+      .strict()
+      .optional(),
+    enable_general_subagent: z.boolean().optional(),
+  })
+  .strict();
 
 const anthropicSkillResponseSchema = z
   .object({
@@ -198,13 +247,14 @@ export const sessionThreadAgentResponseSchema = z
     mcp_servers: z.array(agentMcpServerResponseSchema),
     model: agentModelResponseSchema,
     name: z.string(),
+    _oma: openMaAgentExtensionResponseSchema.optional(),
     skills: z.array(agentSkillResponseSchema),
     system: z.string().nullable(),
     tools: z.array(agentToolResponseSchema),
     type: z.literal("agent"),
     version: z.number().int(),
   })
-  .strict() satisfies z.ZodType<BetaManagedAgentsSessionThreadAgent>;
+  .strict();
 
 export const sessionAgentMultiagentResponseSchema = z
   .object({
@@ -213,10 +263,9 @@ export const sessionAgentMultiagentResponseSchema = z
     ),
     type: z.literal("coordinator"),
   })
-  .strict() satisfies z.ZodType<BetaManagedAgentsSessionMultiagentCoordinator>;
+  .strict();
 
-export const sessionAgentResponseSchema: z.ZodType<BetaManagedAgentsSessionAgent> =
-  z
+export const sessionAgentResponseSchema = z
     .object({
       id: z.string().min(1),
       description: z.string().nullable(),
@@ -224,6 +273,7 @@ export const sessionAgentResponseSchema: z.ZodType<BetaManagedAgentsSessionAgent
       model: agentModelResponseSchema,
       multiagent: sessionAgentMultiagentResponseSchema.nullable(),
       name: z.string().min(1),
+      _oma: openMaAgentExtensionResponseSchema.optional(),
       skills: z.array(agentSkillResponseSchema),
       system: z.string().nullable(),
       tools: z.array(agentToolResponseSchema),

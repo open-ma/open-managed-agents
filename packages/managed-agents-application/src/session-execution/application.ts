@@ -108,8 +108,17 @@ export class SessionRuntimeProjectionApplicationService
       expectedRevision: current.revision,
       events: command.events,
       next: applyRuntimeEvents(current.session, command.events),
+      ...(command.executionFence !== undefined && {
+        executionFence: command.executionFence,
+      }),
+      ...(command.environmentWorkFence !== undefined && {
+        environmentWorkFence: command.environmentWorkFence,
+      }),
     });
     if (projected.type === "not_found") return { type: "not_found" };
+    if (projected.type === "execution_fence_lost") {
+      return { type: "execution_fence_lost" };
+    }
     if (projected.type === "revision_conflict") {
       return {
         type: "version_conflict",

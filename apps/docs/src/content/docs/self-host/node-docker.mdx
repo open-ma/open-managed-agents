@@ -1,6 +1,6 @@
 ---
 title: Node + Docker (no Cloudflare)
-description: Run openma as a single Node process or docker compose stack — no Cloudflare account, no Workers, no Durable Objects, no Containers. SQLite or Postgres backend, local or remote sandbox.
+description: Run openma as a single Node process or docker compose stack — no Cloudflare account, no Workers, no Durable Objects, no Containers. SQLite, Postgres, or MySQL backend; local or remote sandbox.
 ---
 
 import { Aside, Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -17,20 +17,20 @@ Only the I/O bindings change.
   Pick whichever matches your hosting story.
 </Aside>
 
-## Two backends, one image
+## SQL backends, one image
 
-| | SQLite + LocalFs (default) | Postgres + LocalFs |
-|---|---|---|
-| Compose file | `docker-compose.yml` | `docker-compose.postgres.yml` |
-| Best for | Single instance, ≤10 GB sessions, dev, demo | Multi-instance, large tables, share an existing PG cluster |
-| Concurrency | One writer per process | Many writers — HA-able |
-| Backups | `cp ./data/*.db` or [litestream](https://litestream.io) → S3 | `pg_dump` / managed PG snapshots |
-| Extra services | None | + `postgres:16-alpine` (or external PG) |
+| | SQLite + LocalFs (default) | Postgres + LocalFs | MySQL + LocalFs |
+|---|---|---|---|
+| Bundled compose | `docker-compose.yml` | `docker-compose.postgres.yml` | External MySQL 8.x DSN |
+| Best for | Single instance, ≤10 GB sessions, dev, demo | Multi-instance, large tables, share an existing PG cluster | Existing MySQL infrastructure |
+| SQL concurrency | One writer per process | Many writers — HA-able | Many writers — CAS-backed claims |
+| Backups | `cp ./data/*.db` or litestream → S3 | `pg_dump` / managed PG snapshots | `mysqldump` / managed snapshots |
 
 **Same `openma/main-node:dev` image either way** — `DATABASE_URL` env at
-runtime decides. SQLite needs only `DATABASE_PATH`; Postgres needs
-`DATABASE_URL=postgres://...`. better-auth's small `auth.db` stays SQLite
-on both backends regardless.
+runtime decides. SQLite needs only `DATABASE_PATH`; server databases use
+`DATABASE_URL=postgres://...` or `DATABASE_URL=mysql://...`. better-auth
+uses the selected server database; only SQLite mode uses a separate
+`auth.db`.
 
 ## Quickstart (Docker, SQLite)
 
@@ -47,6 +47,9 @@ $EDITOR .env
 # BETTER_AUTH_SECRET=$(openssl rand -hex 32)
 # PLATFORM_ROOT_SECRET=$(openssl rand -base64 32)
 # ANTHROPIC_API_KEY is optional — in production, prefer a per-tenant Model Card.
+# SANDBOX_PROVIDER is required; choose an isolated runtime and add its credentials:
+# SANDBOX_PROVIDER=e2b
+# E2B_API_KEY=...
 
 # First time builds the image; subsequent runs skip --build
 docker compose up -d --build
@@ -95,6 +98,24 @@ For a managed PG (RDS / Neon / Supabase / your cluster), drop the
 `postgres` service block and set `DATABASE_URL=postgres://user:pw@host:5432/oma`
 in `.env`.
 
+## MySQL backend
+
+Use a fresh MySQL 8.x database and the same image:
+
+```bash
+DATABASE_URL=mysql://oma:password@mysql.internal:3306/oma \
+  pnpm --filter @open-managed-agents/main-node start
+
+curl localhost:8787/health
+# → {"auth":"better-auth-mysql","backends":{"agents":"mysql","events":"mysql",...}}
+```
+
+The MySQL adapter owns native DDL and optimistic CAS/transaction details;
+v1 stores use the same Ports as SQLite and Postgres. Bootstrap fails closed
+when an existing database needs a newer explicit migration. Until a shared
+realtime adapter is configured, run one main-node replica so SSE fanout is
+not split between in-process hubs.
+
 ## Login
 
 Default self-host has **no email server**, so the auth path is plain
@@ -114,14 +135,55 @@ The agent's `bash` / `read` / `write` / etc. tools execute in a sandbox.
 
 | Mode | When to pick | Required env |
 |---|---|---|
-| `subprocess` (default) | Local dev, trusted agent code | None — host child_process under `./data/sandboxes/<sid>/`. Zero isolation; the agent has the host's filesystem. |
 | `litebox` | Local hardware isolation, no daemon | `SANDBOX_PROVIDER=litebox`. Host needs `/dev/kvm` (Linux) or Apple Silicon (macOS). Per-VM Firecracker-equivalent via libkrun. |
 | `boxrun` | Multi-host with KVM, OMA pods on managed k8s | `SANDBOX_PROVIDER=boxrun BOXRUN_URL=http://host:8100/v1/default`. Run `boxlite serve` on a separate KVM host; OMA pods reach it over HTTP. |
 | `daytona` | Production / untrusted code | `SANDBOX_PROVIDER=daytona DAYTONA_API_KEY=...` (+ optional `DAYTONA_API_URL`). Daytona-managed Linux VMs, one per session. |
-| `e2b` | E2B SaaS / E2B Infra self-host / Aliyun Agent Sandbox (e2b-compatible) | `SANDBOX_PROVIDER=e2b E2B_API_KEY=...` (+ optional `E2B_API_URL` for non-default endpoint). Firecracker microVMs. |
+| `e2b` | E2B SaaS / E2B Infra self-host / Aliyun Agent Sandbox (e2b-compatible) | `SANDBOX_PROVIDER=e2b E2B_API_KEY=...` (+ optional `E2B_API_URL`, `E2B_SANDBOX_URL`, and `E2B_DOMAIN` for a compatible endpoint; `SANDBOX_IMAGE` selects the template). Firecracker microVMs. |
+
+`SANDBOX_PROVIDER` has no default. Missing, unknown, and `subprocess` values
+fail closed; the non-isolated local adapter is retained only as an internal
+test fixture and cannot be selected by the deployable Node server.
 
 **Remote sandboxes** (Daytona, E2B, BoxRun) sharing memory mounts use
 `MEMORY_S3_*` env (any S3-compatible store — AWS / R2 / OSS / MinIO).
+
+### Run an ACP harness in E2B
+
+Set an Agent's OMA extension to `harness: "acp-sandbox"` and provide the
+process command under `acp.agent`. The selected E2B template must contain that
+binary:
+
+```json
+{
+  "_oma": {
+    "harness": "acp-sandbox",
+    "acp": {
+      "agent": {
+        "command": "codex-acp",
+        "args": [],
+        "cwd": "/workspace"
+      },
+      "restart": {
+        "mode": "on-crash",
+        "max_restarts": 3,
+        "window_ms": 60000
+      }
+    }
+  }
+}
+```
+
+OpenMA uses E2B's live-stdin command channel for ACP JSON-RPC rather than log
+polling. While a turn is running it renews a 90-second lease every 30 seconds.
+When idle, E2B is configured to memory-pause and auto-resume instead of killing
+the ACP process. On host shutdown OpenMA preserves the ACP session checkpoint,
+requests `session/close` when the agent advertises that capability, then tears
+down the child before the sandbox.
+
+For deployment-level fencing, portable `/workspace` checkpoints, immutable
+Session output manifests, and the difference between an official Managed
+Agents worker and an OpenMA-supervised harness, see
+[Managed Runtime Host](/self-host/managed-runtime-host/).
 
 ## Vault sidecar (outbound credential injection)
 
@@ -194,15 +256,15 @@ the pragma strip.
 
 ## Backups
 
-| | SQLite | Postgres |
-|---|---|---|
-| Hot backup | [litestream](https://litestream.io) replicates `./data/*.db` to S3 continuously | `pg_dump` cron / managed PG snapshots / WAL streaming |
-| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it |
-| Sandbox workdirs | Always on local FS — back up `./data/sandboxes/` separately | Same |
-| Memory blobs | `./data/memory-blobs/` — back up separately or set `MEMORY_S3_*` | Same |
-| auth.db | Always SQLite — back up `./data/auth.db` | Same |
+| | SQLite | Postgres | MySQL |
+|---|---|---|---|
+| Hot backup | litestream replicates `./data/*.db` to S3 continuously | `pg_dump` / managed PG snapshots / WAL streaming | `mysqldump` / managed MySQL snapshots |
+| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it | Restore into fresh MySQL, point `DATABASE_URL` at it |
+| Sandbox workdirs | Back up `./data/sandboxes/` separately | Same | Same |
+| Memory blobs | Back up `./data/memory-blobs/` or set `MEMORY_S3_*` | Same | Same |
+| Auth | Separate `./data/auth.db` | In the Postgres database | In the MySQL database |
 
-Both backends share the same crash-recovery test surface (55 tests across
+The backends share the same crash-recovery test surface (55 tests across
 adapter, recovery logic, real-process SIGKILL bootstrap, CF DO eviction).
 
 ## Crash recovery demo

@@ -13,7 +13,7 @@ import type { SessionEvent } from "@open-managed-agents/shared";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { EventLogRepo, StreamRepo, StreamRow } from "../ports";
 
-export type SqlDialect = "sqlite" | "postgres";
+export type SqlDialect = "sqlite" | "postgres" | "mysql";
 
 /**
  * Per-session event log backed by a shared SQL store.
@@ -188,13 +188,16 @@ export class SqlStreamRepo implements StreamRepo {
   async start(messageId: string, startedAt: number): Promise<void> {
     // ON CONFLICT … DO NOTHING is the portable upsert no-op; both
     // SQLite and PG accept it (replaces the prior INSERT OR IGNORE).
-    await this.sql
-      .prepare(
-        `INSERT INTO session_streams
+    const statement = this.dialect === "mysql"
+      ? `INSERT IGNORE INTO session_streams
+           (session_id, message_id, status, chunks_json, started_at)
+         VALUES (?, ?, 'streaming', '[]', ?)`
+      : `INSERT INTO session_streams
            (session_id, message_id, status, chunks_json, started_at)
          VALUES (?, ?, 'streaming', '[]', ?)
-         ON CONFLICT (session_id, message_id) DO NOTHING`,
-      )
+         ON CONFLICT (session_id, message_id) DO NOTHING`;
+    await this.sql
+      .prepare(statement)
       .bind(this.sessionId, messageId, startedAt)
       .run();
   }
@@ -210,7 +213,11 @@ export class SqlStreamRepo implements StreamRepo {
         ? `UPDATE session_streams
              SET chunks_json = ((chunks_json::jsonb) || jsonb_build_array(?::text))::text
            WHERE session_id = ? AND message_id = ? AND status = 'streaming'`
-        : `UPDATE session_streams
+        : this.dialect === "mysql"
+          ? `UPDATE session_streams
+             SET chunks_json = JSON_ARRAY_APPEND(chunks_json, '$', ?)
+           WHERE session_id = ? AND message_id = ? AND status = 'streaming'`
+          : `UPDATE session_streams
              SET chunks_json = json_insert(chunks_json, '$[#]', ?)
            WHERE session_id = ? AND message_id = ? AND status = 'streaming'`;
     await this.sql
@@ -366,11 +373,12 @@ async function readSessionEventColumns(
   dialect: SqlDialect,
 ): Promise<Set<string>> {
   const cols = new Set<string>();
-  if (dialect === "postgres") {
+  if (dialect === "postgres" || dialect === "mysql") {
     const r = await sql
       .prepare(
         `SELECT column_name AS name FROM information_schema.columns
-         WHERE table_name = 'session_events'`,
+         WHERE table_name = 'session_events'
+           ${dialect === "mysql" ? "AND table_schema = DATABASE()" : ""}`,
       )
       .all<{ name: string }>();
     for (const row of r.results ?? []) cols.add(row.name);

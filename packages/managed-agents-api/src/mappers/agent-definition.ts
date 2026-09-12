@@ -13,6 +13,7 @@ import type {
   JsonValue,
 } from "@open-managed-agents/managed-agents-application";
 import type { AgentCreateBody } from "../contracts/agents";
+import { fromOpenMaAgentExtension } from "./openma-agent-extension";
 
 type WireMcpServer = NonNullable<AgentCreateBody["mcp_servers"]>[number];
 type WireMultiagent = Exclude<
@@ -184,6 +185,15 @@ function toCustomToolInputSchema(value: object): AgentCustomToolInputSchema {
 export function toAgentMcpServerInput(
   server: WireMcpServer,
 ): AgentMcpServerInput {
+  if (server.type === "stdio") {
+    return {
+      name: server.name,
+      type: server.type,
+      command: server.command,
+      ...(server.args !== undefined && { args: server.args }),
+      ...(server.env !== undefined && { env: server.env }),
+    };
+  }
   return { name: server.name, type: server.type, url: server.url };
 }
 
@@ -357,6 +367,15 @@ function fromResolvedToolConfig(config: AgentToolConfigInput): object {
 }
 
 export function fromAgentMcpServerInput(server: AgentMcpServerInput): object {
+  if (server.type === "stdio") {
+    return {
+      name: server.name,
+      type: server.type,
+      command: server.command,
+      ...(server.args !== undefined && { args: server.args }),
+      ...(server.env !== undefined && { env: server.env }),
+    };
+  }
   return { name: server.name, type: server.type, url: server.url };
 }
 
@@ -439,6 +458,9 @@ export function fromAgentModel(model: AgentModel): object {
     ...(model.inferenceGeo !== undefined && {
       inference_geo: model.inferenceGeo,
     }),
+    ...(model.providerOptions !== undefined && {
+      provider_options: model.providerOptions,
+    }),
     ...(model.speed !== undefined && { speed: model.speed }),
   };
 }
@@ -453,6 +475,10 @@ export function fromSessionThreadAgent(agent: SessionThreadAgent): object {
     mcp_servers: agent.mcpServers.map(fromAgentMcpServerInput),
     model: fromAgentModel(agent.model),
     name: agent.name,
+    ...(agent.openma !== undefined &&
+      Object.keys(agent.openma).length > 0 && {
+        _oma: fromOpenMaAgentExtension(agent.openma),
+      }),
     skills: agent.skills.map(fromAgentSkillInput),
     system: agent.system,
     tools: agent.tools.map(fromAgentToolInput),

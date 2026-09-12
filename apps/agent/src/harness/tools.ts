@@ -2,6 +2,7 @@ import { dynamicTool, generateText, jsonSchema, tool } from "ai";
 import { z } from "zod";
 import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import {
   connectHttpMcpClient,
   type McpClientPort,
@@ -128,96 +129,6 @@ Format: short markdown. Headings only when the original had them. No introductio
 If the page is an error/404/login wall/empty result, output exactly one line stating that and stop.`;
 
 
-
-/**
- * Poll a started process. SIGTERM on timeout, return partial output.
- *
- * Auto-background-on-timeout was REMOVED 2026-05-13 — see commit msg.
- * The bash tool no longer surfaces a `run_in_background` flag either.
- * Net effect: every bash call has bounded duration; agent always sees
- * either a clean exit or a "timed out, here's partial" string. No
- * synthetic notifications ever inject into the conversation.
- *
- * If/when we re-enable backgrounding, the missing piece is robust
- * cleanup of completion notifications + R2 mount lifecycle (the two
- * bugs that motivated this disable).
- */
-async function pollWithStrategies(
-  proc: ProcessHandle,
-  command: string,
-  timeoutMs: number,
-): Promise<string> {
-  return new Promise<string>((resolve) => {
-    let settled = false;
-
-    const timer = setTimeout(async () => {
-      if (settled) return;
-      settled = true;
-
-      let partial = "";
-      try {
-        const logs = await proc.getLogs();
-        partial = (logs.stdout || "") + (logs.stderr ? "\nstderr: " + logs.stderr : "");
-      } catch {}
-
-      try { await proc.kill("SIGTERM"); } catch {}
-      resolve(truncateResult(
-        `exit=143\nCommand timed out after ${Math.round(timeoutMs / 1000)}s\n${partial}`.trim()
-      ));
-    }, timeoutMs);
-
-    // Poll for normal completion
-    const poll = async () => {
-      while (!settled) {
-        try {
-          const status = await proc.getStatus();
-          // SDK ProcessStatus union (sandbox-Bb3n0SeC.d.ts:655):
-          //   'starting' | 'running' | 'completed' | 'failed' | 'killed' | 'error'
-          // All four non-{starting, running} states are terminal — proc.getLogs()
-          // has the final output and exitCode is set.
-          //
-          // Pre-fix this only checked completed/error/killed; 'failed' (any
-          // non-zero exit, e.g. `git commit` with no identity → exit 128,
-          // npm install missing pkg → exit 1) was NOT in the set, so the
-          // poll loop kept looping until the bash timeout fired. Result:
-          // every error case returned `exit=143 / Command timed out after
-          // 120s` after a 2-minute hang, even when the underlying command
-          // had exited cleanly within milliseconds. Caught 2026-05-13
-          // testing `git commit` (Author identity unknown).
-          if (
-            status === "completed"
-            || status === "failed"
-            || status === "killed"
-            || status === "error"
-          ) {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            const logs = await proc.getLogs();
-            let out = logs.stdout || "";
-            if (logs.stderr) out += (out ? "\n" : "") + "stderr: " + logs.stderr;
-            // Prefer SDK-reported exitCode (carries the real signal — 1
-            // for npm error, 128 for git, etc.). Fall back to status-based
-            // shorthand only when the SDK didn't surface a code.
-            const sdkExit = (proc as { exitCode?: number }).exitCode;
-            const exitCode =
-              typeof sdkExit === "number"
-                ? sdkExit
-                : status === "killed" ? 137
-                : (status === "error" || status === "failed") ? 1
-                : 0;
-            resolve(truncateResult(`exit=${exitCode}\n${out}`));
-            return;
-          }
-        } catch {}
-        await new Promise(r => setTimeout(r, 500));
-      }
-    };
-    poll().catch(() => {
-      if (!settled) { settled = true; clearTimeout(timer); resolve("exit=1\nProcess polling failed"); }
-    });
-  });
-}
 
 /**
  * Wrap a tool execute function so errors are returned as strings to the LLM
@@ -352,16 +263,46 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
  * Checks per-tool config first, then falls back to default_config, then "always_allow".
  */
 export function getToolPermission(agentConfig: AgentConfig, toolName: string): string {
-  for (const t of agentConfig.tools) {
-    if (t.type === "custom") continue;
-    const ts = t as ToolsetConfig;
-    // Per-tool config takes priority
-    const cfg = ts.configs?.find(c => c.name === toolName);
+  const mcpPrefix = "mcp__";
+  if (toolName.startsWith(mcpPrefix)) {
+    for (const toolset of agentConfig.tools) {
+      if (toolset.type !== "mcp_toolset") continue;
+      const ts = toolset as ToolsetConfig & { mcp_server_name?: string };
+      if (!ts.mcp_server_name) continue;
+      const serverPrefix = `${mcpPrefix}${ts.mcp_server_name}__`;
+      if (!toolName.startsWith(serverPrefix)) continue;
+      const remoteToolName = toolName.slice(serverPrefix.length);
+      const cfg = ts.configs?.find((candidate) => candidate.name === remoteToolName);
+      if (cfg?.permission_policy?.type) return cfg.permission_policy.type;
+      return ts.default_config?.permission_policy?.type ?? "always_allow";
+    }
+    return "always_allow";
+  }
+
+  const toolset = agentConfig.tools.find((tool) => tool.type === "agent_toolset_20260401");
+  if (toolset) {
+    const ts = toolset as ToolsetConfig;
+    const cfg = ts.configs?.find((candidate) => candidate.name === toolName);
     if (cfg?.permission_policy?.type) return cfg.permission_policy.type;
-    // Fall back to default config
     if (ts.default_config?.permission_policy?.type) return ts.default_config.permission_policy.type;
   }
   return "always_allow";
+}
+
+function isMcpToolEnabled(
+  agentConfig: AgentConfig,
+  serverName: string,
+  remoteToolName: string,
+): boolean {
+  const toolset = agentConfig.tools.find((tool) => {
+    if (tool.type !== "mcp_toolset") return false;
+    return (tool as ToolsetConfig & { mcp_server_name?: string }).mcp_server_name === serverName;
+  });
+  if (!toolset) return true;
+
+  const ts = toolset as ToolsetConfig;
+  const configured = ts.configs?.find((candidate) => candidate.name === remoteToolName);
+  return configured?.enabled ?? ts.default_config?.enabled ?? true;
 }
 
 function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
@@ -413,7 +354,14 @@ export async function buildTools(
      *  back to raw curl + a warning to the model. */
     toMarkdown?: ToMarkdownProvider;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
-    environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
+    environmentConfig?: {
+      networking?: {
+        type: string;
+        allowed_hosts?: string[];
+        allow_mcp_servers?: boolean;
+        allow_package_managers?: boolean;
+      };
+    };
     /** MCP routing context — wired from SessionDO. The official MCP HTTP
      *  client gets a custom `fetch` that calls
      *  `env.mcpBinding.fetch(req)` with three metadata headers stamped
@@ -424,9 +372,9 @@ export async function buildTools(
      *  through unchanged so the MCP SDK owns the protocol details. Vault
      *  credentials remain main-only — agent worker sees only the
      *  Response. Omitting any of the three (binding, tenantId, sessionId)
-     *  silently disables MCP tool registration — the loop below logs
-     *  nothing because in legacy callsites this is the expected "no MCP"
-     *  path. */
+     *  while an enabled MCP server is declared is a configuration error.
+     *  The builder fails closed instead of silently changing the Agent's
+     *  declared capabilities. */
     mcpBinding?: { fetch: (request: Request) => Promise<Response> };
     tenantId?: string;
     sessionId?: string;
@@ -442,6 +390,8 @@ export async function buildTools(
      *  large pages and offloads raw markdown to /workspace/.web/.
      *  Falsy (default) = no aux work; web_fetch returns raw markdown. */
     auxModel?: LanguageModel;
+    /** Provider-specific request defaults for auxiliary model calls. */
+    auxProviderOptions?: Record<string, unknown>;
     /** Identifier metadata for the aux model — written into aux.model_call
      *  trajectory events so cost dashboards can attribute usage. */
     auxModelInfo?: { model_id: string };
@@ -502,24 +452,12 @@ export async function buildTools(
       execute: safe(async ({ command, timeout }) => {
         const timeoutMs = Math.min(timeout || DEFAULT_BASH_TIMEOUT, MAX_BASH_TIMEOUT);
 
-        // Auto-background-on-timeout was REMOVED 2026-05-13. The
-        // explicit `run_in_background` flag is gone too. Both surfaced
-        // a synthetic <task_notification> as user.message via
-        // pollBackgroundTasks → drainEventQueue, which (a) duplicated
-        // the agent's prior reply when the model treated the
-        // notification as a new user turn, (b) rendered as a confusing
-        // red "You" bubble in console, and (c) returned stale partial
-        // output because the snapshot was taken at backgrounding time
-        // and never refreshed. Hard SIGTERM is the universal contract
-        // now — bounded duration, no notification surface.
-        if (sandbox.startProcess) {
-          const proc = await sandbox.startProcess(command);
-          if (proc) {
-            return await pollWithStrategies(proc, command, timeoutMs);
-          }
-        }
-
-        // Fallback: simple exec (test env, no startProcess)
+        // Auto-background-on-timeout and the explicit
+        // `run_in_background` flag were removed. Foreground bash must use
+        // the Sandbox Port's bounded exec primitive directly: providers
+        // implement command timeout/cancellation at the process boundary,
+        // while startProcess + host polling keeps a long-lived capability
+        // open and can outlive the turn when transport/status polling stalls.
         return truncateResult(await sandbox.exec(command, timeoutMs));
       }),
     });
@@ -905,6 +843,7 @@ export async function buildTools(
           try {
             const summarizeResult = await generateText({
               model: env.auxModel,
+              providerOptions: env.auxProviderOptions as SharedV3ProviderOptions | undefined,
               system: WEB_SUMMARIZE_SYSTEM_PROMPT,
               prompt: `URL: ${url}\n\nPAGE CONTENT (markdown):\n\n${markdown}`,
               maxOutputTokens: 1500,
@@ -1175,25 +1114,28 @@ export async function buildTools(
   // Network policy ("model can only call declared mcp_servers"): enforced
   // at the tool-registration layer below — only declared servers get
   // registered, and the model has no other tool that takes an arbitrary URL.
-  if (agentConfig.mcp_servers?.length) {
+  const mcpDisabledByEnvironment =
+    env?.environmentConfig?.networking?.type === "limited"
+    && env.environmentConfig.networking.allow_mcp_servers !== true;
+  if (agentConfig.mcp_servers?.length && !mcpDisabledByEnvironment) {
+    const stdioServer = agentConfig.mcp_servers.find(
+      (server) => server.type === "stdio",
+    );
+    if (stdioServer) {
+      throw new Error(
+        `Standard MCP stdio server "${stdioServer.name}" requires a harness-in-sandbox runtime`,
+      );
+    }
     if (!env?.mcpBinding || !env?.tenantId || !env?.sessionId) {
-      // Wiring missing — buildTools called from a context that didn't
-      // thread the binding through (legacy path or test harness). Skip MCP
-      // setup silently rather than crash; the model just won't see the
-      // tools and will report "I don't have that available". Caller logs
-      // are responsible for surfacing this misconfiguration in real
-      // deployments — see SessionDO callsites which always thread it.
+      throw new Error(
+        "Declared MCP servers require mcpBinding, tenantId, and sessionId",
+      );
     } else {
       const mcpBinding = env.mcpBinding;
       const tenantId = env.tenantId;
       const sessionId = env.sessionId;
       for (const server of agentConfig.mcp_servers) {
-        if (!server.url) {
-          // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
-          // (warmup hasn't run, or spawn failed). Skip silently — re-attempt
-          // when the next buildTools fires after warmup.
-          continue;
-        }
+        if (server.type === "stdio") continue;
         const serverName = server.name;
         // Custom fetch the protocol client calls for every MCP request. We stamp
         // routing metadata and hand the Request to main; main does the
@@ -1219,6 +1161,7 @@ export async function buildTools(
           const remoteTools = await mcpClient.listTools({ timeoutMs: MCP_SETUP_TIMEOUT_MS });
           for (const definition of remoteTools) {
             const toolName = definition.name;
+            if (!isMcpToolEnabled(agentConfig, server.name, toolName)) continue;
             tools[`mcp__${server.name}__${toolName}`] = dynamicTool({
               title: definition.title,
               description: definition.description,
@@ -1249,14 +1192,17 @@ export async function buildTools(
           mcpClientsByToolSet.set(tools, clients);
         } catch (err) {
           if (mcpClient) await mcpClient.close().catch(() => undefined);
-          // Connection / handshake / tools/list failure for one server
-          // (e.g. main worker unreachable, vault credential missing,
-          // upstream MCP server down, our timeout fired). Log + skip so
-          // a single misconfiguration doesn't take the whole turn down.
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
-          );
+          // An upstream MCP outage removes that server's tools for this
+          // turn, but must be visible in the managed event stream. This is
+          // an explicit degraded state rather than the previous silent skip.
+          const message =
+            `MCP setup failed for "${server.name}" (${server.url}): `
+            + (err instanceof Error ? err.message : String(err));
+          console.error(`[mcp] ${message}`);
+          env.broadcastEvent?.({
+            type: "session.warning",
+            message,
+          } as SessionEvent);
         }
       }
     }

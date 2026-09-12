@@ -125,6 +125,18 @@ describe("SessionManager runtime adapter", () => {
               acpSessionId: "acp-cli-prompt",
               async *prompt(text: string) {
                 yield { type: "agent_message_chunk", text: `reply:${text}` };
+                yield {
+                  type: "promptComplete",
+                  response: {
+                    stopReason: "end_turn",
+                    usage: {
+                      totalTokens: 110,
+                      inputTokens: 10,
+                      outputTokens: 5,
+                      cachedReadTokens: 95,
+                    },
+                  },
+                };
               },
             });
           },
@@ -158,6 +170,24 @@ describe("SessionManager runtime adapter", () => {
         tenant_id: "workspace-prompt",
         turn_id: "turn-cli-prompt",
         event: { type: "agent_message_chunk", text: "reply:hello" },
+      },
+      {
+        type: "session.event",
+        session_id: "session-cli-prompt",
+        tenant_id: "workspace-prompt",
+        turn_id: "turn-cli-prompt",
+        event: {
+          type: "promptComplete",
+          response: {
+            stopReason: "end_turn",
+            usage: {
+              totalTokens: 110,
+              inputTokens: 10,
+              outputTokens: 5,
+              cachedReadTokens: 95,
+            },
+          },
+        },
       },
       {
         type: "session.complete",

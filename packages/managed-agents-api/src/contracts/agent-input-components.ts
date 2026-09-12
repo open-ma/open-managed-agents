@@ -129,12 +129,24 @@ export const agentToolInputSchema = z.discriminatedUnion("type", [
 ]) satisfies z.ZodType<AgentToolInput>;
 
 export const agentMcpServerInputSchema = z
-  .object({
-    name: z.string().min(1),
-    type: z.literal("url"),
-    url: z.string().min(1),
-  })
-  .strict() satisfies z.ZodType<BetaManagedAgentsURLMCPServerParams>;
+  .discriminatedUnion("type", [
+    z
+      .object({
+        name: z.string().min(1),
+        type: z.literal("url"),
+        url: z.string().min(1),
+      })
+      .strict(),
+    z
+      .object({
+        name: z.string().min(1),
+        type: z.literal("stdio"),
+        command: z.string().startsWith("/"),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string(), z.string()).optional(),
+      })
+      .strict(),
+  ]);
 
 export const agentSkillInputSchema = z.discriminatedUnion("type", [
   z

@@ -1,0 +1,797 @@
+---
+import Base from "../layouts/Base.astro";
+import {
+  buildDeploymentPlan,
+  DEPLOYMENT_TARGETS,
+  type DeploymentTarget,
+} from "../lib/deploy-wizard";
+
+const targetOrder: DeploymentTarget[] = ["cloudflare", "docker", "fly", "vercel"];
+const initialPlan = buildDeploymentPlan({
+  target: "cloudflare",
+  modelSetup: "console",
+  dataMode: "managed",
+});
+---
+
+<Base
+  title="Deploy OpenMA | OpenMA"
+  description="Choose an OpenMA topology, review its requirements, and leave with an executable deployment plan for Cloudflare, Docker, Fly.io, or Vercel."
+  canonical="/deploy/"
+  keywords="deploy OpenMA, self host AI agents, Cloudflare Workers agent platform, Docker agent platform"
+>
+  <div class="deploy-page" data-deploy-wizard>
+    <header class="deploy-intro">
+      <div>
+        <p class="deploy-kicker">Self-hosting configurator</p>
+        <h1>Deploy OpenMA</h1>
+        <p class="deploy-lede">
+          Pick the runtime boundary. We will turn it into a reviewed topology,
+          an executable handoff, and a concrete health check.
+        </p>
+      </div>
+      <div class="privacy-note" role="note">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3 5.5 6v5.2c0 4.1 2.7 7.8 6.5 9.8 3.8-2 6.5-5.7 6.5-9.8V6L12 3Z"></path>
+          <path d="m9.2 12 1.8 1.8 3.9-4"></path>
+        </svg>
+        <span><strong>Secrets never leave your machine.</strong> Choices stay in this tab; secret values go directly to the provider.</span>
+      </div>
+    </header>
+
+    <nav class="step-track" aria-label="Deployment progress">
+      <button type="button" class="step-item is-active" data-step-jump="1" aria-current="step">
+        <span>1</span><span>Platform</span>
+      </button>
+      <span class="step-line" aria-hidden="true"></span>
+      <button type="button" class="step-item" data-step-jump="2" disabled>
+        <span>2</span><span>Configure</span>
+      </button>
+      <span class="step-line" aria-hidden="true"></span>
+      <button type="button" class="step-item" data-step-jump="3" disabled>
+        <span>3</span><span>Launch</span>
+      </button>
+    </nav>
+
+    <div class="wizard-shell">
+      <section class="wizard-card" aria-live="polite">
+        <div class="wizard-panel" data-step-panel="1">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-eyebrow">Step 1 of 3</p>
+              <h2>Where should the control plane live?</h2>
+              <p>Choose the deployment target. Sandbox providers can still be swapped later.</p>
+            </div>
+          </div>
+
+          <fieldset class="target-grid">
+            <legend class="sr-only">Deployment platform</legend>
+            {targetOrder.map((id) => {
+              const target = DEPLOYMENT_TARGETS[id];
+              return (
+                <label class:list={["target-card", id === "cloudflare" && "is-selected"]} data-target-card={id}>
+                  <input
+                    class="sr-only"
+                    type="radio"
+                    name="deployment-target"
+                    value={id}
+                    checked={id === "cloudflare"}
+                  />
+                  <span class="target-icon" aria-hidden="true">
+                    {id === "cloudflare" && (
+                      <svg viewBox="0 0 24 24"><path d="M8.2 16.8h10.1a3.2 3.2 0 0 0 .3-6.4A5.6 5.6 0 0 0 8 9.2a4 4 0 0 0 .2 7.6Z"></path><path d="M3.5 16.8h2.2"></path></svg>
+                    )}
+                    {id === "docker" && (
+                      <svg viewBox="0 0 24 24"><path d="M3 13h17c0 4.5-3.2 7-7.7 7H8.5C5.5 20 3 17.5 3 13Z"></path><path d="M7 10h3v3H7zM10 7h3v3h-3zM10 10h3v3h-3zM13 10h3v3h-3zM17.5 11.5c.5-1.5 1.4-2.2 2.5-2.5"></path></svg>
+                    )}
+                    {id === "fly" && (
+                      <svg viewBox="0 0 24 24"><path d="M5 17.5 18.5 4l1.5 1.5L14.5 20l-3-5.5L5 17.5Z"></path><path d="m11.5 14.5 2-2"></path></svg>
+                    )}
+                    {id === "vercel" && (
+                      <svg viewBox="0 0 24 24"><path d="m12 4 9 16H3L12 4Z"></path></svg>
+                    )}
+                  </span>
+                  <span class="target-copy">
+                    <span class="target-title-row">
+                      <strong>{target.name}</strong>
+                      <span class:list={["availability", `is-${target.availability}`]}>{target.eyebrow}</span>
+                    </span>
+                    <span class="target-summary">{target.summary}</span>
+                    <span class="target-note">{target.note}</span>
+                  </span>
+                  <span class="target-check" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="m7 12 3 3 7-7"></path></svg>
+                  </span>
+                </label>
+              );
+            })}
+          </fieldset>
+        </div>
+
+        <div class="wizard-panel" data-step-panel="2" hidden>
+          <div class="panel-heading">
+            <div>
+              <p class="panel-eyebrow">Step 2 of 3</p>
+              <h2>Choose safe defaults</h2>
+              <p>These choices only shape your plan. No secret values are requested or transmitted.</p>
+            </div>
+          </div>
+
+          <fieldset class="choice-section">
+            <legend>Model credentials</legend>
+            <label class="choice-row is-selected" data-choice-row>
+              <input class="sr-only" type="radio" name="model-setup" value="console" checked />
+              <span class="radio-dot" aria-hidden="true"></span>
+              <span><strong>Configure in Console</strong><small>Add a tenant-scoped Model Card after the deployment is healthy.</small></span>
+              <span class="recommendation">Recommended</span>
+            </label>
+            <label class="choice-row" data-choice-row>
+              <input class="sr-only" type="radio" name="model-setup" value="environment" />
+              <span class="radio-dot" aria-hidden="true"></span>
+              <span><strong>Environment fallback</strong><small>Set a provider key directly in the deployment environment.</small></span>
+            </label>
+          </fieldset>
+
+          <fieldset class="choice-section" data-data-mode-section hidden>
+            <legend>State database</legend>
+            <div class="segmented-control">
+              <label class="is-selected" data-segment>
+                <input class="sr-only" type="radio" name="data-mode" value="sqlite" checked />
+                <span>SQLite</span>
+              </label>
+              <label data-segment>
+                <input class="sr-only" type="radio" name="data-mode" value="postgres" />
+                <span>Postgres</span>
+              </label>
+            </div>
+            <p class="field-hint" data-data-mode-hint>Best for one durable host. The data directory must be persistent.</p>
+          </fieldset>
+
+          <div class="boundary-callout" data-platform-boundary>
+            <span class="boundary-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 8v4M12 16h.01"></path><circle cx="12" cy="12" r="9"></circle></svg>
+            </span>
+            <div><strong>Provider-managed state</strong><p>Cloudflare provisions D1, R2, KV, Queue, Durable Objects, and Containers in your account.</p></div>
+          </div>
+        </div>
+
+        <div class="wizard-panel" data-step-panel="3" hidden>
+          <div class="panel-heading launch-heading">
+            <div>
+              <p class="panel-eyebrow">Step 3 of 3</p>
+              <h2>Your deployment handoff</h2>
+              <p data-launch-description>Run this locally. The CLI opens provider authentication and reports each resource it creates.</p>
+            </div>
+            <span class="launch-status" data-launch-status>{initialPlan.status}</span>
+          </div>
+
+          <section class="deployment-return" data-vercel-callback hidden aria-live="polite">
+            <span class="deployment-return-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="m7 12 3 3 7-7"></path><circle cx="12" cy="12" r="9"></circle></svg>
+            </span>
+            <div>
+              <p class="deployment-return-kicker">Vercel returned successfully</p>
+              <h3 data-vercel-project-name>OpenMA project created</h3>
+              <p>The control plane is deployed. Next, open it to verify health, then configure its Environment and Sandbox credentials.</p>
+              <div class="deployment-return-actions">
+                <a data-vercel-deployment-link target="_blank" rel="noopener noreferrer">Open deployment</a>
+                <a data-vercel-dashboard-link target="_blank" rel="noopener noreferrer">View in Vercel</a>
+              </div>
+            </div>
+          </section>
+
+          <section class="provider-launch" data-provider-launch hidden>
+            <div>
+              <strong>Deploy the control plane</strong>
+              <p>Vercel clones the repository, provisions Neon Postgres, and collects the remaining values directly. You return here after deployment to finish Sandbox setup.</p>
+            </div>
+            <a class="vercel-deploy-button" data-vercel-deploy target="_blank" rel="noopener noreferrer">
+              Deploy with Vercel
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 8 15H4l8-15Z"></path></svg>
+            </a>
+          </section>
+
+          <div class="command-block">
+            <div class="command-toolbar">
+              <span data-command-label>Terminal</span>
+              <button type="button" data-copy-command>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre><code data-command-output>{initialPlan.command}</code></pre>
+          </div>
+
+          <div class="verification-row">
+            <div>
+              <span>Verify after deploy</span>
+              <code data-verification-output>{initialPlan.verificationCommand}</code>
+            </div>
+            <a href="https://docs.openma.dev/self-host/overview/" target="_blank" rel="noopener noreferrer">
+              Full guide
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>
+            </a>
+          </div>
+
+          <p class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></p>
+        </div>
+
+        <footer class="wizard-actions">
+          <button type="button" class="secondary-button" data-back disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+            Back
+          </button>
+          <span class="keyboard-hint"><kbd>←</kbd><kbd>→</kbd> to move</span>
+          <button type="button" class="primary-button" data-next>
+            Continue
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+          </button>
+        </footer>
+      </section>
+
+      <aside class="receipt-card" aria-label="Deployment summary">
+        <div class="receipt-heading">
+          <div>
+            <span class="receipt-mark" aria-hidden="true"><span></span></span>
+            <div><p>Deployment receipt</p><strong data-receipt-name>{initialPlan.name}</strong></div>
+          </div>
+          <span class="receipt-state" data-receipt-status>{initialPlan.status}</span>
+        </div>
+
+        <dl class="receipt-list">
+          <div><dt>Topology</dt><dd data-receipt-topology>{initialPlan.topology}</dd></div>
+          <div><dt>Persistence</dt><dd data-receipt-persistence>{initialPlan.persistence}</dd></div>
+          <div><dt>Model setup</dt><dd data-receipt-model>{initialPlan.modelSetup}</dd></div>
+          <div><dt>Estimated time</dt><dd data-receipt-estimate>{initialPlan.estimate}</dd></div>
+        </dl>
+
+        <div class="requirement-list">
+          <p>Before you start</p>
+          <ul data-requirements>
+            {initialPlan.requirements.map((item) => <li><span aria-hidden="true">✓</span>{item}</li>)}
+          </ul>
+        </div>
+
+        <div class="receipt-footer">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5.5 6v5.2c0 4.1 2.7 7.8 6.5 9.8 3.8-2 6.5-5.7 6.5-9.8V6L12 3Z"></path></svg>
+          <p><strong>No hidden control plane.</strong><br />Resources land in the account you choose.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    import {
+      buildDeploymentPlan,
+      parseBrowserSelection,
+      parseVercelDeploymentCallback,
+      serializeBrowserSelection,
+      type DataMode,
+      type DeploymentTarget,
+      type ModelSetup,
+    } from "../lib/deploy-wizard";
+
+    const root = document.querySelector<HTMLElement>("[data-deploy-wizard]");
+    if (root) {
+      let step = 1;
+      let furthestStep = 1;
+      let target: DeploymentTarget = "cloudflare";
+      let modelSetup: ModelSetup = "console";
+      let dataMode: DataMode = "managed";
+      let vercelCallback = parseVercelDeploymentCallback(new URLSearchParams(window.location.search));
+      const storageKey = "openma:deploy-wizard:v1";
+      const stepStorageKey = `${storageKey}:step`;
+      const stored = parseBrowserSelection(sessionStorage.getItem(storageKey));
+      if (stored) {
+        target = stored.target;
+        modelSetup = stored.modelSetup;
+        dataMode = stored.dataMode;
+      }
+      const storedStep = Number(sessionStorage.getItem(stepStorageKey));
+      if (Number.isInteger(storedStep) && storedStep >= 1 && storedStep <= 3) {
+        step = storedStep;
+        furthestStep = storedStep;
+      }
+      if (vercelCallback) {
+        target = "vercel";
+        dataMode = "managed";
+        step = 3;
+        furthestStep = 3;
+      }
+
+      const get = <T extends Element>(selector: string) => root.querySelector<T>(selector);
+      const getAll = <T extends Element>(selector: string) => [...root.querySelectorAll<T>(selector)];
+
+      const replaceList = (list: HTMLUListElement | null, items: string[]) => {
+        if (!list) return;
+        list.replaceChildren(...items.map((item) => {
+          const li = document.createElement("li");
+          const check = document.createElement("span");
+          check.setAttribute("aria-hidden", "true");
+          check.textContent = "✓";
+          li.append(check, item);
+          return li;
+        }));
+      };
+
+      const renderPlan = () => {
+        const callbackUrl = new URL("/deploy/", window.location.origin);
+        callbackUrl.searchParams.set("provider", "vercel");
+        callbackUrl.searchParams.set("phase", "callback");
+        const plan = buildDeploymentPlan(
+          { target, modelSetup, dataMode },
+          { vercelRedirectUrl: callbackUrl.toString() },
+        );
+        sessionStorage.setItem(storageKey, serializeBrowserSelection({ target, modelSetup, dataMode }));
+        get<HTMLElement>("[data-receipt-name]")!.textContent = plan.name;
+        get<HTMLElement>("[data-receipt-status]")!.textContent = plan.status;
+        get<HTMLElement>("[data-receipt-topology]")!.textContent = plan.topology;
+        get<HTMLElement>("[data-receipt-persistence]")!.textContent = plan.persistence;
+        get<HTMLElement>("[data-receipt-model]")!.textContent = plan.modelSetup;
+        get<HTMLElement>("[data-receipt-estimate]")!.textContent = plan.estimate;
+        get<HTMLElement>("[data-launch-status]")!.textContent = plan.status;
+        get<HTMLElement>("[data-command-output]")!.textContent = plan.command;
+        get<HTMLElement>("[data-verification-output]")!.textContent = plan.verificationCommand;
+        replaceList(get<HTMLUListElement>("[data-requirements]"), plan.requirements);
+
+        const providerLaunch = get<HTMLElement>("[data-provider-launch]");
+        const deployLink = get<HTMLAnchorElement>("[data-vercel-deploy]");
+        if (providerLaunch) providerLaunch.hidden = target !== "vercel" || Boolean(vercelCallback);
+        if (deployLink && plan.launchUrl) deployLink.href = plan.launchUrl;
+
+        const callbackPanel = get<HTMLElement>("[data-vercel-callback]");
+        if (callbackPanel) callbackPanel.hidden = target !== "vercel" || !vercelCallback;
+        if (vercelCallback) {
+          const projectName = get<HTMLElement>("[data-vercel-project-name]");
+          const deploymentLink = get<HTMLAnchorElement>("[data-vercel-deployment-link]");
+          const dashboardLink = get<HTMLAnchorElement>("[data-vercel-dashboard-link]");
+          if (projectName) projectName.textContent = `${vercelCallback.projectName} is deployed`;
+          if (deploymentLink) deploymentLink.href = vercelCallback.deploymentUrl;
+          if (dashboardLink) {
+            dashboardLink.hidden = !vercelCallback.projectDashboardUrl;
+            if (vercelCallback.projectDashboardUrl) dashboardLink.href = vercelCallback.projectDashboardUrl;
+          }
+        }
+
+        const commandLabel = get<HTMLElement>("[data-command-label]");
+        if (commandLabel) commandLabel.textContent = target === "vercel" ? "CLI fallback" : "Terminal";
+
+        const description = get<HTMLElement>("[data-launch-description]");
+        if (description) {
+          description.textContent = target === "vercel"
+            ? "The packaged Function handles API traffic, signed webhook wakeups, and bounded fallback polls; the agent loop runs inside Vercel Sandbox."
+            : target === "fly"
+              ? "The Fly adapter keeps one Machine awake, mounts durable state, derives its public origin, and starts the portable Node control plane."
+              : "Run this locally. Authentication and generated secrets stay between your terminal and the provider.";
+        }
+
+        const dataSection = get<HTMLElement>("[data-data-mode-section]");
+        const boundary = get<HTMLElement>("[data-platform-boundary]");
+        const usesNodeState = target === "docker" || target === "fly";
+        if (dataSection) dataSection.hidden = !usesNodeState;
+        if (boundary) {
+          boundary.hidden = usesNodeState;
+          const title = boundary.querySelector("strong");
+          const body = boundary.querySelector("p");
+          if (title && body) {
+            if (target === "vercel") {
+              title.textContent = "Packaged beta boundary";
+              body.textContent = "External Postgres and object storage are durable. The Function is bounded; claimed Work, ACP steering, and the long-running harness loop stay inside Vercel Sandbox.";
+            } else {
+              title.textContent = "Provider-managed state";
+              body.textContent = "Cloudflare provisions D1, R2, KV, Queue, Durable Objects, and Containers in your account.";
+            }
+          }
+        }
+      };
+
+      const renderStep = () => {
+        sessionStorage.setItem(stepStorageKey, String(step));
+        for (const panel of getAll<HTMLElement>("[data-step-panel]")) {
+          panel.hidden = Number(panel.dataset.stepPanel) !== step;
+        }
+        for (const button of getAll<HTMLButtonElement>("[data-step-jump]")) {
+          const buttonStep = Number(button.dataset.stepJump);
+          button.disabled = buttonStep > furthestStep;
+          button.classList.toggle("is-active", buttonStep === step);
+          button.classList.toggle("is-complete", buttonStep < step);
+          if (buttonStep === step) button.setAttribute("aria-current", "step");
+          else button.removeAttribute("aria-current");
+        }
+        const back = get<HTMLButtonElement>("[data-back]");
+        const next = get<HTMLButtonElement>("[data-next]");
+        if (back) back.disabled = step === 1;
+        if (next) {
+          if (step === 3) {
+            next.textContent = "Start over";
+          } else {
+            next.replaceChildren("Continue");
+            const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            icon.setAttribute("viewBox", "0 0 24 24");
+            icon.setAttribute("aria-hidden", "true");
+            icon.innerHTML = '<path d="m9 18 6-6-6-6"></path>';
+            next.append(icon);
+          }
+        }
+        renderPlan();
+      };
+
+      for (const radio of getAll<HTMLInputElement>('input[name="deployment-target"]')) {
+        radio.checked = radio.value === target;
+        radio.closest<HTMLElement>("[data-target-card]")?.classList.toggle("is-selected", radio.checked);
+        radio.addEventListener("change", () => {
+          target = radio.value as DeploymentTarget;
+          if (target !== "vercel") vercelCallback = null;
+          dataMode = target === "cloudflare" || target === "vercel" ? "managed" : "sqlite";
+          for (const card of getAll<HTMLElement>("[data-target-card]")) {
+            card.classList.toggle("is-selected", card.dataset.targetCard === target);
+          }
+          renderPlan();
+        });
+      }
+
+      for (const radio of getAll<HTMLInputElement>('input[name="model-setup"]')) {
+        radio.checked = radio.value === modelSetup;
+        radio.closest<HTMLElement>("[data-choice-row]")?.classList.toggle("is-selected", radio.checked);
+        radio.addEventListener("change", () => {
+          modelSetup = radio.value as ModelSetup;
+          for (const row of getAll<HTMLElement>("[data-choice-row]")) {
+            row.classList.toggle("is-selected", row.contains(radio));
+          }
+          renderPlan();
+        });
+      }
+
+      for (const radio of getAll<HTMLInputElement>('input[name="data-mode"]')) {
+        radio.checked = radio.value === dataMode || (dataMode === "managed" && radio.value === "sqlite");
+        radio.closest<HTMLElement>("[data-segment]")?.classList.toggle("is-selected", radio.checked);
+        radio.addEventListener("change", () => {
+          dataMode = radio.value as DataMode;
+          for (const segment of getAll<HTMLElement>("[data-segment]")) {
+            segment.classList.toggle("is-selected", segment.contains(radio));
+          }
+          const hint = get<HTMLElement>("[data-data-mode-hint]");
+          if (hint) hint.textContent = dataMode === "postgres"
+            ? "Recommended for multiple API replicas or a managed database boundary."
+            : "Best for one durable host. The data directory must be persistent.";
+          renderPlan();
+        });
+      }
+
+      get<HTMLButtonElement>("[data-next]")?.addEventListener("click", () => {
+        if (step === 3) vercelCallback = null;
+        step = step === 3 ? 1 : step + 1;
+        furthestStep = Math.max(furthestStep, step);
+        renderStep();
+      });
+      get<HTMLButtonElement>("[data-back]")?.addEventListener("click", () => {
+        step = Math.max(1, step - 1);
+        renderStep();
+      });
+      for (const button of getAll<HTMLButtonElement>("[data-step-jump]")) {
+        button.addEventListener("click", () => {
+          const nextStep = Number(button.dataset.stepJump);
+          if (nextStep <= furthestStep) {
+            step = nextStep;
+            renderStep();
+          }
+        });
+      }
+
+      root.addEventListener("keydown", (event) => {
+        if (event.target instanceof HTMLInputElement) return;
+        if (event.key === "ArrowLeft" && step > 1) {
+          step -= 1;
+          renderStep();
+        }
+        if (event.key === "ArrowRight" && step < furthestStep) {
+          step += 1;
+          renderStep();
+        }
+      });
+
+      get<HTMLButtonElement>("[data-copy-command]")?.addEventListener("click", async () => {
+        const command = get<HTMLElement>("[data-command-output]")?.textContent ?? "";
+        const feedback = get<HTMLElement>("[data-copy-feedback]");
+        try {
+          await navigator.clipboard.writeText(command);
+          if (feedback) feedback.textContent = "Command copied to clipboard.";
+          const label = get<HTMLElement>("[data-copy-command] span");
+          if (label) label.textContent = "Copied";
+          window.setTimeout(() => {
+            if (label) label.textContent = "Copy";
+            if (feedback) feedback.textContent = "";
+          }, 1800);
+        } catch {
+          if (feedback) feedback.textContent = "Clipboard access was blocked. Select and copy the command manually.";
+        }
+      });
+
+      renderStep();
+      if (vercelCallback) {
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+    }
+  </script>
+</Base>
+
+<style>
+  .deploy-page {
+    --wizard-radius: 12px;
+    --wizard-row: 2.25rem;
+    --wizard-control: 2rem;
+    --wizard-pad: clamp(1rem, 2.4vw, 1.5rem);
+    --wizard-shadow: 0 1px 0 rgb(0 0 0 / 3%), 0 18px 52px -34px rgb(0 0 0 / 24%);
+    min-height: calc(100vh - 4rem);
+    padding: clamp(2.5rem, 6vw, 5.5rem) 1rem 5rem;
+    background:
+      radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--color-brand-subtle) 42%, transparent), transparent 27rem),
+      var(--color-bg-sidebar);
+  }
+
+  .deploy-intro,
+  .step-track,
+  .wizard-shell {
+    width: min(70rem, 100%);
+    margin-inline: auto;
+  }
+
+  .deploy-intro {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  .deploy-kicker,
+  .panel-eyebrow {
+    margin: 0 0 .45rem;
+    color: var(--color-brand);
+    font-family: var(--font-mono);
+    font-size: .75rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .deploy-intro h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: clamp(2rem, 4vw, 3.25rem);
+    line-height: 1;
+    letter-spacing: -.035em;
+  }
+
+  .deploy-lede {
+    max-width: 39rem;
+    margin: .85rem 0 0;
+    color: var(--color-fg-muted);
+    font-size: .95rem;
+    line-height: 1.55;
+  }
+
+  .privacy-note {
+    display: flex;
+    align-items: center;
+    gap: .65rem;
+    max-width: 22rem;
+    padding: .75rem .85rem;
+    border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--color-bg) 74%, transparent);
+    color: var(--color-fg-muted);
+    font-size: .75rem;
+    line-height: 1.4;
+  }
+
+  .privacy-note strong { color: var(--color-fg); font-weight: 600; }
+  .privacy-note svg { width: 1.1rem; height: 1.1rem; flex: none; fill: none; stroke: var(--color-brand); stroke-width: 1.8; }
+
+  .step-track {
+    display: flex;
+    align-items: center;
+    margin-bottom: .75rem;
+    padding-inline: .25rem;
+  }
+
+  .step-item {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    min-height: var(--wizard-control);
+    padding: 0 .45rem;
+    border: 0;
+    background: transparent;
+    color: var(--color-fg-subtle);
+    font: inherit;
+    font-size: .75rem;
+    cursor: pointer;
+  }
+
+  .step-item:disabled { cursor: default; opacity: .65; }
+  .step-item > span:first-child { display: grid; width: 1.35rem; height: 1.35rem; place-items: center; border: 1px solid var(--color-border); border-radius: 50%; background: var(--color-bg); font-family: var(--font-mono); font-size: .68rem; }
+  .step-item.is-active { color: var(--color-fg); font-weight: 600; }
+  .step-item.is-active > span:first-child { border-color: var(--color-brand); background: var(--color-brand); color: var(--color-brand-fg); }
+  .step-item.is-complete > span:first-child { border-color: color-mix(in srgb, var(--color-brand) 45%, var(--color-border)); color: var(--color-brand); }
+  .step-line { width: clamp(1.5rem, 5vw, 4rem); height: 1px; background: var(--color-border); }
+
+  .wizard-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1.65fr) minmax(17rem, .75fr);
+    gap: .75rem;
+    align-items: stretch;
+  }
+
+  .wizard-card,
+  .receipt-card {
+    border: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent);
+    background: var(--color-bg);
+    box-shadow: var(--wizard-shadow);
+  }
+
+  .wizard-card {
+    display: flex;
+    min-height: 34.5rem;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: var(--wizard-radius);
+  }
+
+  .wizard-panel { flex: 1; padding: var(--wizard-pad); }
+  .wizard-panel[hidden], .choice-section[hidden], .boundary-callout[hidden] { display: none; }
+  .panel-heading { display: flex; min-height: 4.5rem; align-items: start; justify-content: space-between; gap: 1rem; padding-bottom: 1.15rem; border-bottom: 1px solid var(--color-border); }
+  .panel-heading h2 { margin: 0; font-size: 1.12rem; font-weight: 600; letter-spacing: -.015em; }
+  .panel-heading p:last-child { margin: .35rem 0 0; color: var(--color-fg-muted); font-size: .82rem; }
+
+  .target-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0 0; padding: 0; border: 0; }
+  .target-card { position: relative; display: grid; min-height: 8.6rem; grid-template-columns: 2rem minmax(0, 1fr) 1.25rem; gap: .7rem; align-items: start; padding: .9rem; border: 1px solid var(--color-border); border-radius: 8px; background: color-mix(in srgb, var(--color-bg-surface) 42%, var(--color-bg)); cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease; user-select: none; }
+  .target-card:hover { border-color: var(--color-border-strong); background: var(--color-bg-surface); }
+  .target-card:focus-within { outline: 1px solid var(--color-brand); outline-offset: 1px; }
+  .target-card.is-selected { border-color: color-mix(in srgb, var(--color-brand) 55%, var(--color-border)); background: color-mix(in srgb, var(--color-brand-subtle) 50%, var(--color-bg)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-brand) 10%, transparent); }
+  .target-icon { display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg); color: var(--color-fg-muted); }
+  .target-icon svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .target-copy { min-width: 0; }
+  .target-title-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; min-height: 2rem; }
+  .target-title-row strong { font-size: .86rem; font-weight: 600; }
+  .availability { flex: none; padding: .15rem .42rem; border-radius: 999px; background: var(--color-bg-surface); color: var(--color-fg-muted); font-size: .64rem; font-weight: 600; }
+  .availability.is-ready { background: color-mix(in srgb, #3cab61 12%, var(--color-bg)); color: color-mix(in srgb, #238743 84%, var(--color-fg)); }
+  .availability.is-planned { background: color-mix(in srgb, #d18b2c 12%, var(--color-bg)); color: color-mix(in srgb, #9b651f 82%, var(--color-fg)); }
+  .target-summary, .target-note { display: block; }
+  .target-summary { margin-top: .38rem; color: var(--color-fg); font-size: .79rem; line-height: 1.4; }
+  .target-note { margin-top: .3rem; color: var(--color-fg-subtle); font-size: .7rem; line-height: 1.4; }
+  .target-check { display: grid; width: 1.2rem; height: 1.2rem; place-items: center; margin-top: .38rem; border: 1px solid var(--color-border); border-radius: 50%; color: transparent; }
+  .target-check svg { width: .75rem; height: .75rem; fill: none; stroke: currentColor; stroke-width: 2.2; }
+  .target-card.is-selected .target-check { border-color: var(--color-brand); background: var(--color-brand); color: var(--color-brand-fg); }
+
+  .choice-section { margin: 1rem 0 0; padding: 0 0 1rem; border: 0; border-bottom: 1px solid var(--color-border); }
+  .choice-section legend { margin-bottom: .5rem; font-size: .75rem; font-weight: 600; }
+  .choice-row { display: grid; grid-template-columns: 1.15rem minmax(0, 1fr) auto; gap: .7rem; align-items: center; min-height: 3.7rem; padding: .55rem .7rem; border-radius: 7px; cursor: pointer; user-select: none; }
+  .choice-row:hover, .choice-row.is-selected { background: var(--color-bg-surface); }
+  .choice-row strong, .choice-row small { display: block; }
+  .choice-row strong { font-size: .8rem; font-weight: 600; }
+  .choice-row small { margin-top: .12rem; color: var(--color-fg-muted); font-size: .7rem; }
+  .radio-dot { width: 1rem; height: 1rem; border: 1px solid var(--color-border-strong); border-radius: 50%; background: var(--color-bg); box-shadow: inset 0 0 0 3px var(--color-bg); }
+  .choice-row.is-selected .radio-dot { border-color: var(--color-brand); background: var(--color-brand); }
+  .recommendation { color: var(--color-brand); font-size: .68rem; font-weight: 600; }
+  .segmented-control { display: inline-flex; padding: .18rem; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-surface); }
+  .segmented-control label { min-width: 5.5rem; padding: .42rem .75rem; border-radius: 5px; color: var(--color-fg-muted); font-size: .75rem; text-align: center; cursor: pointer; user-select: none; }
+  .segmented-control label.is-selected { background: var(--color-bg); color: var(--color-fg); box-shadow: 0 1px 3px rgb(0 0 0 / 8%); font-weight: 600; }
+  .field-hint { margin: .55rem 0 0; color: var(--color-fg-subtle); font-size: .7rem; }
+  .boundary-callout { display: flex; gap: .65rem; margin-top: 1rem; padding: .85rem; border: 1px solid var(--color-border); border-radius: 8px; background: color-mix(in srgb, var(--color-bg-surface) 48%, var(--color-bg)); }
+  .boundary-callout strong { font-size: .78rem; font-weight: 600; }
+  .boundary-callout p { margin: .18rem 0 0; color: var(--color-fg-muted); font-size: .72rem; line-height: 1.45; }
+  .boundary-icon { display: grid; width: 1.7rem; height: 1.7rem; flex: none; place-items: center; color: var(--color-brand); }
+  .boundary-icon svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; }
+
+  .launch-heading { align-items: center; }
+  .launch-status, .receipt-state { padding: .24rem .5rem; border-radius: 999px; background: color-mix(in srgb, #3cab61 12%, var(--color-bg)); color: color-mix(in srgb, #238743 84%, var(--color-fg)); font-size: .68rem; font-weight: 600; white-space: nowrap; }
+  .provider-launch,
+  .deployment-return {
+    display: flex;
+    align-items: center;
+    gap: .85rem;
+    margin-top: 1rem;
+    padding: .85rem;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+  .provider-launch[hidden], .deployment-return[hidden] { display: none; }
+  .provider-launch { justify-content: space-between; background: color-mix(in srgb, var(--color-bg-surface) 42%, var(--color-bg)); }
+  .provider-launch strong { display: block; font-size: .8rem; font-weight: 600; }
+  .provider-launch p { max-width: 31rem; margin: .2rem 0 0; color: var(--color-fg-muted); font-size: .7rem; line-height: 1.45; }
+  .vercel-deploy-button {
+    display: inline-flex;
+    min-height: var(--wizard-control);
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    gap: .45rem;
+    padding: 0 .8rem;
+    border: 1px solid var(--color-fg);
+    border-radius: 6px;
+    background: var(--color-fg);
+    color: var(--color-bg);
+    font-size: .74rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .vercel-deploy-button:hover { opacity: .82; }
+  .vercel-deploy-button svg { width: .8rem; height: .8rem; fill: currentColor; stroke: none; }
+  .deployment-return { align-items: flex-start; border-color: color-mix(in srgb, #3cab61 35%, var(--color-border)); background: color-mix(in srgb, #3cab61 7%, var(--color-bg)); }
+  .deployment-return-icon { display: grid; width: 1.9rem; height: 1.9rem; flex: none; place-items: center; border-radius: 50%; background: color-mix(in srgb, #3cab61 13%, var(--color-bg)); color: color-mix(in srgb, #238743 84%, var(--color-fg)); }
+  .deployment-return-icon svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .deployment-return-kicker { margin: 0 0 .22rem; color: color-mix(in srgb, #238743 84%, var(--color-fg)); font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+  .deployment-return h3 { margin: 0; font-size: .86rem; font-weight: 600; }
+  .deployment-return h3 + p { margin: .3rem 0 0; color: var(--color-fg-muted); font-size: .71rem; line-height: 1.45; }
+  .deployment-return-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: .55rem; }
+  .deployment-return-actions a { color: var(--color-brand); font-size: .71rem; font-weight: 600; }
+  .command-block { margin-top: 1rem; overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px; background: #181817; color: #f1f0eb; }
+  .command-toolbar { display: flex; height: var(--wizard-control); align-items: center; justify-content: space-between; padding: 0 .7rem; border-bottom: 1px solid #343330; color: #aaa8a1; font-family: var(--font-mono); font-size: .68rem; }
+  .command-toolbar button { display: inline-flex; height: 1.6rem; align-items: center; gap: .35rem; padding: 0 .45rem; border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  .command-toolbar button:hover { background: #2c2b29; color: #fff; }
+  .command-toolbar svg { width: .8rem; height: .8rem; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .command-block pre { min-height: 10.5rem; margin: 0; padding: 1rem; overflow: auto; font: 500 .75rem/1.75 var(--font-mono); white-space: pre-wrap; }
+  .verification-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: .75rem; padding: .75rem .85rem; border: 1px solid var(--color-border); border-radius: 8px; }
+  .verification-row span, .verification-row code { display: block; }
+  .verification-row span { color: var(--color-fg-subtle); font-size: .66rem; text-transform: uppercase; letter-spacing: .05em; }
+  .verification-row code { margin-top: .24rem; font-family: var(--font-mono); font-size: .7rem; overflow-wrap: anywhere; }
+  .verification-row a { display: inline-flex; align-items: center; gap: .3rem; flex: none; color: var(--color-brand); font-size: .72rem; font-weight: 600; }
+  .verification-row a svg { width: .85rem; height: .85rem; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .copy-feedback { min-height: 1rem; margin: .5rem 0 0; color: var(--color-fg-muted); font-size: .68rem; }
+
+  .wizard-actions { display: flex; height: 3.6rem; align-items: center; gap: .5rem; padding: 0 var(--wizard-pad); border-top: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-bg-surface) 30%, var(--color-bg)); }
+  .wizard-actions button { display: inline-flex; height: var(--wizard-control); align-items: center; justify-content: center; gap: .35rem; padding: 0 .8rem; border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; cursor: pointer; }
+  .wizard-actions button:disabled { opacity: .38; cursor: default; }
+  .wizard-actions svg { width: .9rem; height: .9rem; fill: none; stroke: currentColor; stroke-width: 2; }
+  .secondary-button { border: 1px solid var(--color-border); background: var(--color-bg); color: var(--color-fg); }
+  .primary-button { min-width: 6.5rem; margin-left: auto; border: 1px solid var(--color-brand); background: var(--color-brand); color: var(--color-brand-fg); }
+  .primary-button:hover { background: var(--color-brand-hover); }
+  .keyboard-hint { color: var(--color-fg-subtle); font-size: .65rem; }
+  .keyboard-hint kbd { display: inline-grid; min-width: 1.2rem; height: 1.2rem; place-items: center; margin-right: .18rem; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg); font-family: var(--font-mono); font-size: .62rem; }
+
+  .receipt-card { display: flex; min-height: 34.5rem; flex-direction: column; overflow: hidden; border-radius: var(--wizard-radius); }
+  .receipt-heading { display: flex; min-height: 4.7rem; align-items: center; justify-content: space-between; gap: .5rem; padding: 0 1rem; border-bottom: 1px solid var(--color-border); }
+  .receipt-heading > div { display: flex; align-items: center; gap: .65rem; min-width: 0; }
+  .receipt-heading p { margin: 0 0 .15rem; color: var(--color-fg-subtle); font-size: .66rem; }
+  .receipt-heading strong { display: block; overflow: hidden; font-size: .82rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .receipt-mark { display: grid; width: 1.8rem; height: 1.8rem; flex: none; place-items: center; border-radius: 7px; background: var(--color-brand); }
+  .receipt-mark span { width: .65rem; height: .65rem; border: 1.5px solid var(--color-brand-fg); border-radius: 50%; box-shadow: .28rem .28rem 0 -.12rem var(--color-brand-fg); }
+  .receipt-list { margin: 0; padding: .45rem 1rem; }
+  .receipt-list > div { padding: .68rem 0; border-bottom: 1px solid color-mix(in srgb, var(--color-border) 68%, transparent); }
+  .receipt-list dt { margin-bottom: .25rem; color: var(--color-fg-subtle); font-size: .65rem; text-transform: uppercase; letter-spacing: .05em; }
+  .receipt-list dd { margin: 0; color: var(--color-fg); font-size: .73rem; line-height: 1.4; }
+  .requirement-list { padding: .55rem 1rem 1rem; }
+  .requirement-list > p { margin: 0 0 .55rem; font-size: .72rem; font-weight: 600; }
+  .requirement-list ul { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+  .requirement-list li { display: grid; grid-template-columns: 1rem minmax(0, 1fr); gap: .4rem; color: var(--color-fg-muted); font-size: .69rem; line-height: 1.35; }
+  .requirement-list li span { color: var(--color-brand); font-weight: 700; }
+  .receipt-footer { display: flex; align-items: start; gap: .55rem; margin-top: auto; padding: .85rem 1rem; border-top: 1px solid var(--color-border); background: var(--color-bg-surface); }
+  .receipt-footer svg { width: 1rem; height: 1rem; flex: none; fill: none; stroke: var(--color-fg-muted); stroke-width: 1.7; }
+  .receipt-footer p { margin: 0; color: var(--color-fg-muted); font-size: .66rem; line-height: 1.45; }
+  .receipt-footer strong { color: var(--color-fg); font-weight: 600; }
+
+  @media (max-width: 52rem) {
+    .deploy-intro { align-items: start; flex-direction: column; }
+    .privacy-note { max-width: none; }
+    .wizard-shell { grid-template-columns: 1fr; }
+    .receipt-card { min-height: auto; }
+    .receipt-footer { margin-top: 0; }
+  }
+
+  @media (max-width: 38rem) {
+    .deploy-page { padding-inline: .65rem; }
+    .deploy-intro { padding-inline: .35rem; }
+    .step-item > span:last-child, .keyboard-hint { display: none; }
+    .step-track { justify-content: center; }
+    .step-line { width: 3.5rem; }
+    .target-grid { grid-template-columns: 1fr; }
+    .target-card { min-height: 7.7rem; }
+    .wizard-card { min-height: 40rem; }
+    .verification-row { align-items: start; flex-direction: column; }
+    .provider-launch { align-items: stretch; flex-direction: column; }
+    .vercel-deploy-button { align-self: stretch; }
+    .choice-row { grid-template-columns: 1.15rem minmax(0, 1fr); }
+    .recommendation { grid-column: 2; }
+  }
+</style>

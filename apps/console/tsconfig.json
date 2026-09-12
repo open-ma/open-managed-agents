@@ -9,13 +9,14 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "../..",
     "paths": {
       "@/*": ["./src/*"],
       "@/registry/default/ui/*": ["./src/components/ui/*"],
       "@/registry/default/blocks/*": ["./src/components/blocks/*"],
       "@/registry/default/hooks/*": ["./src/hooks/*"],
-      "@/registry/default/lib/*": ["./src/lib/*"]
+      "@/registry/default/lib/*": ["./src/lib/*"],
+      "@openma/sdk": ["../../packages/sdk/src/index.ts"]
     }
   },
   "include": ["src"]

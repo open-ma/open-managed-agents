@@ -30,7 +30,10 @@ export { IndeterminateCredentialValidationProbe } from "./credential-validation-
 export { CronDeploymentSchedulePlanner } from "./deployment-schedule-planner";
 export { DeduplicatingDreamCurator } from "./deduplicating-dream-curator";
 export { TimerEnvironmentWorkAvailabilityWaiter } from "./environment-work-availability-waiter";
+export * from "./environment-work-webhook-wakeup";
 export { OpaqueEnvironmentWorkSessionCredentialIssuer } from "./environment-work-session-credential-issuer";
+export * from "./environment-work-session-token";
+export * from "./environment-work-runtime-ingress";
 export {
   InProcessDreamExecutionScheduler,
   inProcessDreamExecutionSchedulerModule,
@@ -39,9 +42,20 @@ export type {
   InProcessDreamExecutionSchedulerDependencies,
   InProcessDreamExecutionSchedulerModuleOptions,
 } from "./in-process-dream-execution-scheduler";
-export { EnvironmentAwareSessionLifecycleRouter } from "./session-lifecycle-router";
+export {
+  environmentExecutionAuthority,
+  EnvironmentAwareSessionEventDispatchRouter,
+  EnvironmentAwareSessionEventStreamRouter,
+  EnvironmentAwareSessionLifecycleRouter,
+} from "./session-lifecycle-router";
+export type {
+  EnvironmentAwareSessionEventStreamRouterDependencies,
+  EnvironmentExecutionAuthority,
+} from "./session-lifecycle-router";
 export { LocalTunnelProvisioner } from "./local-tunnel-provisioner";
 export { WebCryptoMemoryContentDescriptor } from "./memory-content-descriptor";
+export * from "./managed-memory-snapshot";
+export * from "./managed-session-memory-sync";
 export { ZipSkillPackageCompiler } from "./skill-package-compiler";
 export { WebCryptoTunnelCertificateAuthority } from "./webcrypto-tunnel-certificate-authority";
 export { WebCryptoTunnelTokenManager } from "./webcrypto-tunnel-token-manager";
@@ -236,6 +250,16 @@ export function decodeRuntimeEvent(
   }
   if (raw.type === "span.outcome_evaluation_end") {
     decoded.usage = normalizeModelUsage(raw.usage);
+  }
+  if (
+    (raw.type === "agent.tool_result" || raw.type === "agent.mcp_tool_result")
+    && typeof raw.content === "string"
+  ) {
+    // The legacy harness wire emits scalar tool output while the official
+    // Managed Agents history contract requires an array of content blocks.
+    // Normalize at the runtime boundary so every store/transport sees the
+    // same canonical application shape.
+    decoded.content = [{ type: "text", text: raw.content }];
   }
   return [decoded as unknown as StreamSessionEvent];
 }
@@ -540,6 +564,8 @@ interface RuntimeAgentSnapshot {
   model: {
     id: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    inference_geo?: string;
+    provider_options?: Record<string, unknown>;
     speed?: "standard" | "fast";
   };
   system: string;
@@ -686,6 +712,12 @@ function runtimeAgentSnapshot(input: StartSessionExecution): RuntimeAgentSnapsho
     model: {
       id: agent.model.id,
       ...(agent.model.effort !== undefined && { effort: agent.model.effort }),
+      ...(agent.model.inferenceGeo !== undefined && {
+        inference_geo: agent.model.inferenceGeo,
+      }),
+      ...(agent.model.providerOptions !== undefined && {
+        provider_options: structuredClone(agent.model.providerOptions),
+      }),
       ...(agent.model.speed !== undefined && { speed: agent.model.speed }),
     },
     system: agent.system ?? "",

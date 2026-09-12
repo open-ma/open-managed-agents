@@ -150,6 +150,32 @@ Every session gets its own Cloudflare Container instance via the `SANDBOX` Durab
 
 If you want to restrict outbound destinations, edit `apps/agent/src/sandbox/proxy.ts` to add allowlist rules.
 
+## Retention and deletion guarantees
+
+Retention is split by artifact class; a provider's runtime retention is never
+treated as durable storage:
+
+| Artifact | Default behavior | Who owns the policy |
+|---|---|---|
+| Session-scoped file metadata and blobs | `DELETE /v1/sessions/:id` stops the runtime and then performs a tenant-scoped, best-effort cascade; a failed blob delete is logged for reconciliation | OpenMA cleanup hook + operator reconciliation |
+| Session output prefix | The same delete path removes objects under the tenant/session output prefix; listing and deletion are paginated | OpenMA cleanup hook + bucket lifecycle backstop |
+| Native harness state / workspace checkpoint | Published as an immutable checkpoint candidate; only the active fenced candidate is used for restore | Selected Runtime Host provider |
+| Backup objects | Cloudflare SDK uploads carry a seven-day TTL by default; self-host adapters must configure an equivalent object-store lifecycle | Provider/operator |
+| SessionDO event and stream rows | Durable for the life of the SessionDO; no automatic row TTL is enabled yet | Explicit maintenance job (not implicit request code) |
+| Memory versions | Daily 03:00 UTC retention sweep keeps the newest version and prunes older versions after 30 days | Scheduler (`croner` on Node, Wrangler cron on CF) |
+
+Deletion is intentionally best-effort after the session row is removed. The
+cleanup hook is tenant-scoped and idempotent, so a retry/reconciliation pass
+cannot remove another tenant's files even when opaque session IDs collide.
+The runtime is stopped before cleanup starts; a provider that cannot prove a
+hard stop must keep the resource fenced and report the orphan instead of
+reusing it.
+
+For self-host deployments, the scheduler starts with the main process and is
+stopped during graceful shutdown. For Cloudflare, the main Worker receives a
+per-minute cron tick and dispatches the same jobs with `waitUntil`; use
+`wrangler dev --test-scheduled` to exercise a tick locally.
+
 ## Common troubleshooting
 
 ### "1010 Cloudflare Browser Integrity" on POST

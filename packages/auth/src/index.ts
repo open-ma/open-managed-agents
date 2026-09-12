@@ -25,6 +25,23 @@ export interface AuthSession {
 export interface ApiKeyResolution {
   tenantId: string;
   userId?: string;
+  credential?:
+    | { type: "workspace" }
+    | { type: "environment"; environmentId: string }
+    | {
+        type: "environment_work_session";
+        environmentId: string;
+        sessionId: string;
+        workId: string;
+        claimedAt: string;
+        generation: number;
+      };
+}
+
+export interface BearerTokenRequest {
+  token: string;
+  method: string;
+  path: string;
 }
 
 export interface AuthMiddlewareDeps {
@@ -34,6 +51,11 @@ export interface AuthMiddlewareDeps {
   resolveSession(headers: Headers): Promise<AuthSession | null>;
   /** Resolve an x-api-key value → tenant + optional user. Null on miss. */
   resolveApiKey(apiKey: string): Promise<ApiKeyResolution | null>;
+  /** Resolve and scope-check a short-lived worker bearer. Workspace and
+   * environment API keys are handled by resolveApiKey as a fallback. */
+  resolveBearerToken?(
+    request: BearerTokenRequest,
+  ): Promise<ApiKeyResolution | null>;
   /** Look up the user's default tenant (first membership by created_at). */
   defaultTenantForUser(userId: string): Promise<string | null>;
   /** Validate (user, tenant) membership — used for x-active-tenant. */
@@ -46,13 +68,67 @@ export interface AuthMiddlewareDeps {
   bypassPath?(path: string): boolean;
 }
 
+function environmentWorkPath(environmentId: string): string {
+  return `/v1/environments/${encodeURIComponent(environmentId)}/work`;
+}
+
+/** Environment service keys are Bearer-only and cannot escape their Work API. */
+export function allowsApiKeyRequest(
+  resolution: ApiKeyResolution,
+  request: Pick<BearerTokenRequest, "path"> & { transport: "bearer" | "x-api-key" },
+): boolean {
+  if (resolution.credential?.type === "environment") {
+    if (request.transport !== "bearer") return false;
+    const root = environmentWorkPath(resolution.credential.environmentId);
+    return request.path === root || request.path.startsWith(`${root}/`);
+  }
+  if (resolution.credential?.type === "environment_work_session") {
+    // The cryptographic Work-token resolver already validates the exact
+    // Session/Work route, method, claim generation, and expiry.
+    return request.transport === "bearer";
+  }
+
+  // A workspace key may administer Work through the normal x-api-key API,
+  // but it must never become a standing Environment Worker bearer. Embedded
+  // and external workers therefore enter through the same environment-scoped
+  // credential boundary.
+  const isEnvironmentWork = /^\/v1\/environments\/[^/]+\/work(?:\/|$)/.test(
+    request.path,
+  );
+  return !(request.transport === "bearer" && isEnvironmentWork);
+}
+
 const DEFAULT_BYPASS = (path: string) =>
   path === "/health" || path.startsWith("/auth/");
+
+function authenticationFailure(path: string, message: string) {
+  if (path.startsWith("/v1/") && !path.startsWith("/v1/oma/")) {
+    return {
+      type: "error" as const,
+      error: { type: "authentication_error" as const, message },
+    };
+  }
+  return { error: message };
+}
+
+function authorizationFailure(path: string, message: string) {
+  if (path.startsWith("/v1/") && !path.startsWith("/v1/oma/")) {
+    return {
+      type: "error" as const,
+      error: { type: "permission_error" as const, message },
+    };
+  }
+  return { error: message };
+}
 
 export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
   const bypassPath = deps.bypassPath ?? DEFAULT_BYPASS;
   return createMiddleware<{
-    Variables: { tenant_id: string; user_id?: string };
+    Variables: {
+      tenant_id: string;
+      user_id?: string;
+      auth_credential?: ApiKeyResolution["credential"];
+    };
   }>(async (c, next) => {
     if (bypassPath(c.req.path)) return next();
 
@@ -74,22 +150,61 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     const apiKey = c.req.header("x-api-key");
     if (apiKey) {
       const r = await deps.resolveApiKey(apiKey);
-      if (!r) return c.json({ error: "Invalid API key" }, 401);
+      if (!r) return c.json(authenticationFailure(c.req.path, "Invalid API key"), 401);
+      if (!allowsApiKeyRequest(r, { path: c.req.path, transport: "x-api-key" })) {
+        return c.json(
+          authorizationFailure(c.req.path, "API key is not authorized for this resource"),
+          403,
+        );
+      }
       c.set("tenant_id", r.tenantId);
       if (r.userId) c.set("user_id", r.userId);
+      if (r.credential !== undefined) c.set("auth_credential", r.credential);
       return next();
     }
 
-    // 2. Cookie session
+    // 2. Official Managed Agents helpers use Bearer auth for both the
+    // standing environment key and the per-work sessions token. Resolve the
+    // scoped token first; the policy guard below prevents a workspace key from
+    // masquerading as the standing Environment Worker bearer.
+    const authorization = c.req.header("authorization") ?? "";
+    if (authorization.startsWith("Bearer ")) {
+      const token = authorization.slice("Bearer ".length);
+      const scoped = deps.resolveBearerToken === undefined
+        ? null
+        : await deps.resolveBearerToken({
+            token,
+            method: c.req.method,
+            path: c.req.path,
+          });
+      const resolved = scoped ?? await deps.resolveApiKey(token);
+      if (!resolved) {
+        return c.json(authenticationFailure(c.req.path, "Invalid bearer token"), 401);
+      }
+      if (!allowsApiKeyRequest(resolved, { path: c.req.path, transport: "bearer" })) {
+        return c.json(
+          authorizationFailure(c.req.path, "Bearer token is not authorized for this resource"),
+          403,
+        );
+      }
+      c.set("tenant_id", resolved.tenantId);
+      if (resolved.userId) c.set("user_id", resolved.userId);
+      if (resolved.credential !== undefined) {
+        c.set("auth_credential", resolved.credential);
+      }
+      return next();
+    }
+
+    // 3. Cookie session
     let session: AuthSession | null = null;
     try {
       session = await deps.resolveSession(c.req.raw.headers);
     } catch {
-      return c.json({ error: "Unauthorized" }, 401);
+      return c.json(authenticationFailure(c.req.path, "Unauthorized"), 401);
     }
-    if (!session) return c.json({ error: "Unauthorized" }, 401);
+    if (!session) return c.json(authenticationFailure(c.req.path, "Unauthorized"), 401);
 
-    // 3. Tenant resolution.
+    // 4. Tenant resolution.
     let tenantId: string | null = null;
     const requested = c.req.header("x-active-tenant") || "";
     if (requested) {

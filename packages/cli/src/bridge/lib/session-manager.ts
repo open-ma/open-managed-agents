@@ -543,7 +543,19 @@ export class SessionManager {
         // The latter often carries the *only* signal that the turn failed
         // (e.g. wrong model id, auth missing) — silently skipping it would
         // make session.complete arrive as if everything worked.
-        if (t === "promptComplete") continue;
+        if (t === "promptComplete") {
+          // Preserve the standard ACP PromptResponse (including experimental
+          // cache token usage) through the product-neutral relay. The cloud
+          // harness consumes this terminal sentinel before session.complete.
+          this.#send({
+            type: "session.event",
+            session_id: p.session_id,
+            tenant_id: sess.tenantId,
+            turn_id: p.turn_id,
+            event: ev,
+          });
+          continue;
+        }
         if (t === "promptError") {
           promptErr = (ev as { error?: string }).error ?? "ACP prompt error (no message)";
           continue;

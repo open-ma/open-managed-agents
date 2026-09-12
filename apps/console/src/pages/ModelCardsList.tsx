@@ -15,6 +15,7 @@ import { TextInput, SecretInput } from "../components/Input";
 import { toast } from "sonner";
 import type { ModelCard } from "@open-managed-agents/api-types";
 import { useI18n } from "../i18n";
+import { LocalDebugOnlyWarning } from "../components/LocalDebugOnlyWarning";
 
 // Common Pi provider presets. The actual provider id is an open string; the
 // text field below also accepts any current/future Pi id or a custom id.
@@ -393,6 +394,7 @@ export function ModelCardsList() {
           </>
         }>
         <form autoComplete="off" onSubmit={(e) => e.preventDefault()} className="space-y-3">
+          <LocalDebugOnlyWarning />
           {error && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{error}</div>}
           <div>
             <Label htmlFor="modelcard-id" className="text-sm text-fg-muted block mb-1">

@@ -34,6 +34,7 @@ export * from "./environment-work/enqueuer";
 export * from "./environment-work/enqueuer-application";
 export * from "./environment-work/environment-source";
 export * from "./environment-work/persistence";
+export * from "./environment-work/wakeup";
 export * from "./deployments/application";
 export * from "./deployments/agent-source";
 export * from "./deployments/environment-source";

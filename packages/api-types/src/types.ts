@@ -49,30 +49,28 @@ export interface AgentConfig {
   model: string | {
     id: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    inference_geo?: string;
+    provider_options?: Record<string, unknown>;
     speed?: "standard" | "fast";
   };
   system: string;
   tools: ToolConfig[];
-  mcp_servers?: Array<{
-    name: string;
-    type: string;
-    /** Required for remote (HTTP/SSE) servers. Optional when `stdio` is set —
-     *  in that case the URL is derived from the spawned process's localhost port. */
-    url?: string;
-    authorization_token?: string;
-    /** Spawn this MCP server in the sandbox container. The process binds to
-     *  127.0.0.1:port using its built-in SSE transport, and OMA routes the
-     *  existing HTTP-based MCP tool wiring at it. Lets us host stdio-only
-     *  third-party MCP servers without a separate gateway. */
-    stdio?: {
-      command: string;             // e.g. "uvx"
-      args?: string[];             // e.g. ["my-mcp-server", "--transport", "sse", "--port", "8765"]
-      env?: Record<string, string>;
-      port: number;                // port the server listens on inside the sandbox
-      sse_path?: string;           // default "/sse"
-      ready_timeout_ms?: number;   // default 60000 — how long to wait for the port to bind
-    };
-  }>;
+  mcp_servers?: Array<
+    | {
+        name: string;
+        type: "url" | "http" | "sse";
+        url: string;
+        authorization_token?: string;
+      }
+    | {
+        /** Standard MCP stdio transport, launched by the sandbox Agent. */
+        name: string;
+        type: "stdio";
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+      }
+  >;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   /**
@@ -81,13 +79,22 @@ export interface AgentConfig {
    * When unset, tools that would benefit from summarization fall back to
    * returning raw content. Set this to opt into compressed tool results.
    */
-  aux_model?: string | { id: string; speed?: "standard" | "fast" };
+  aux_model?: string | {
+    id: string;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    inference_geo?: string;
+    provider_options?: Record<string, unknown>;
+    speed?: "standard" | "fast";
+  };
   harness?: string;
   /** ACP process configuration for the `acp-sandbox` harness. The process is
    * spawned inside the session Sandbox through SandboxDuplexProcessPort; the
    * OpenMA host retains ownership of the ACP loop and canonical event stream. */
   acp?: {
     agent: {
+      /** Canonical ACP registry id. Enables the matching native-state adapter;
+       * legacy records without it fall back to matching the command basename. */
+      id?: string;
       command: string;
       args?: string[];
       env?: Record<string, string | undefined>;

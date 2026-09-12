@@ -81,10 +81,10 @@ Run `oma --help` or `oma <command> --help` for the full surface.
 
 ## SDK
 
-The openma API is **wire-compatible with the [Claude Managed Agents API](https://docs.anthropic.com/)**, so the recommended client is one of Anthropic's official SDKs pointed at our `baseURL`. One SDK, two providers — moving between them is a config line.
+The openma API is **wire-compatible with the [Claude Managed Agents API](https://docs.anthropic.com/)**. Use an Anthropic SDK directly for the standard surface. TypeScript applications that also use OpenMA extensions can use `@openma/sdk`: it composes the official client, adds strong extension types, and does not reimplement requests, pagination, streaming, or errors.
 
-<Aside type="caution" title="@openma/sdk is deprecated">
-  The standalone `@openma/sdk` package is no longer maintained. Existing installs keep working, but new projects should use the official Anthropic SDKs as shown below.
+<Aside type="note" title="The Managed API stays official">
+  `new OpenMA().beta` is the exact `@anthropic-ai/sdk` beta resource object. Standard calls remain portable; OpenMA-only Agent settings are isolated under `_oma`.
 </Aside>
 
 ### Install
@@ -92,9 +92,9 @@ The openma API is **wire-compatible with the [Claude Managed Agents API](https:/
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```bash
-    npm i @anthropic-ai/sdk
-    # or: pnpm add @anthropic-ai/sdk
-    # or: bun add @anthropic-ai/sdk
+    npm i @openma/sdk
+    # or: pnpm add @openma/sdk
+    # or: bun add @openma/sdk
     ```
   </TabItem>
   <TabItem label="Python">
@@ -116,9 +116,9 @@ The openma API is **wire-compatible with the [Claude Managed Agents API](https:/
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
-    import Anthropic from "@anthropic-ai/sdk";
+    import { OpenMA } from "@openma/sdk";
 
-    const client = new Anthropic({
+    const client = new OpenMA({
       baseURL: "https://app.openma.dev",
       apiKey: process.env.OMA_API_KEY!,
     });
@@ -219,32 +219,60 @@ Every namespace in the official SDK works against openma:
 
 ### OMA-specific endpoints
 
-Endpoints that don't exist in Anthropic's API (tenants, OAuth, integrations, evals, cost reports, runtimes, …) live under `/v1/oma/*`. They aren't typed in the official SDK — call them via the underlying client:
+Endpoints that don't exist in Anthropic's API (tenants, OAuth, integrations, evals, cost reports, runtimes, …) live under `/v1/oma/*`. `@openma/sdk` provides typed resources for supported extensions and a path-guarded fallback for the rest:
 
 ```ts
-const usage = await client._client.get("/v1/oma/cost_report");
+const usage = await client.oma.request<{ total_cost: string }>({
+  method: "get",
+  path: "/v1/oma/cost_report",
+});
 ```
 
 Or use plain `fetch` — every OMA endpoint is JSON, no extra runtime needed.
 
 ### OMA-only extensions
 
-A small set of OMA-specific agent fields (auxiliary model, harness selector, sandbox runtime binding) are passed through under an `_oma:` body field on agent create / update calls. The server reads them; the upstream Claude Managed Agents backend would ignore them. They are optional — agents that omit `_oma` behave exactly like a vanilla Claude Managed Agents call.
+A small set of OMA-specific agent fields (auxiliary model, harness selector, sandbox runtime binding) are passed under an `_oma:` body field on Agent create / update calls. OpenMA reads them; do not send `_oma` to an Anthropic endpoint. They are optional — agents that omit `_oma` use the vanilla Claude Managed Agents shape.
+
+Provider-specific inference options are JSON and stay on the model they affect:
+
+```ts
+await client.beta.agents.update("agent_abc123", {
+  model: {
+    id: "deepseek-chat",
+    provider_options: {
+      pi: { reasoning: "off", samplingParams: { temperature: 0 } },
+    },
+  },
+  _oma: {
+    aux_model: {
+      id: "deepseek-chat",
+      provider_options: { pi: { reasoning: "off" } },
+    },
+  },
+});
+```
+
+The main model options reach main-turn and compaction calls. Auxiliary options
+reach tool-internal model calls such as `web_fetch` summarization. Keep custom
+Agent extensions under `_oma`; arbitrary root fields are rejected.
 
 | Field | Purpose |
 |---|---|
 | `aux_model` | Auxiliary model used for tool-internal LLM work (e.g. `web_fetch` summarization). When unset, tools fall back to returning raw content. |
+| `appendable_prompts` | Versioned prompt IDs appended to the Agent system context. |
 | `harness` | Selects the agent loop harness implementation. Reserved for OMA-managed runtimes. |
+| `acp` | Process, restart, idle-timeout, and per-turn-timeout configuration used when `harness` is `acp-sandbox`. The command runs through the selected sandbox provider's duplex-process Port. |
 | `runtime_binding` | Selects which sandbox runtime services the agent's sessions. Reserved for OMA-managed runtimes. |
 
-The Stainless-generated SDKs in every language pass unknown body fields through unchanged — there is no separate `@openma/sdk` to install. Use the SDK's standard escape hatch:
+TypeScript gets strong request and response types from `@openma/sdk`. Python and Go continue to use their official SDK escape hatches:
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
-    import Anthropic from "@anthropic-ai/sdk";
+    import { OpenMA } from "@openma/sdk";
 
-    const client = new Anthropic({
+    const client = new OpenMA({
       baseURL: "https://app.openma.dev",
       apiKey: process.env.OMA_API_KEY!,
     });
@@ -252,11 +280,13 @@ The Stainless-generated SDKs in every language pass unknown body fields through 
     const agent = await client.beta.agents.create({
       name: "researcher",
       model: { id: "claude-opus-4-7" },
-      _oma: { aux_model: { id: "claude-haiku-4-5" } },
-    } as any); // SDK is strict-typed; extras pass through at runtime
+      _oma: {
+        aux_model: { id: "claude-haiku-4-5" },
+        appendable_prompts: ["prompt_review"],
+      },
+    });
 
-    // Response: cast to read the field back.
-    console.log((agent as any)._oma?.aux_model?.id);
+    console.log(agent._oma?.aux_model?.id);
     ```
   </TabItem>
   <TabItem label="Python">

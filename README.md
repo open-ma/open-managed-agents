@@ -8,19 +8,21 @@
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
   <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
+  <img src="https://img.shields.io/badge/OpenAI-Agents%20API%20%2B%20SDK-412991" alt="OpenAI Agents API and SDK support" />
 </p>
 
 # Open Managed Agents
 
-**Open-source alternative to Claude Managed Agents** — and a foundation for open-source, self-hosted Claude Tag-style agents.
+**Open-source, self-hosted alternative to Claude Managed Agents and OpenAI Agents API.**
 
 🌐 **[openma.dev](https://openma.dev)** · 📖 **[docs.openma.dev](https://docs.openma.dev)** · 💬 **[github.com/openma-ai/open-managed-agents](https://github.com/openma-ai/open-managed-agents)**
 
-Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, Slack/GitHub/Linear integrations, and crash recovery out of the box. Drop-in compatible with the Claude Managed Agents API; runs on Cloudflare Workers + Durable Objects, or `docker compose up` on your own box.
+OpenMA runs agents with durable sessions, sandboxed tools, memory, encrypted credentials, and crash recovery. Use the Claude Managed Agents API on Cloudflare or Node, or the official OpenAI SDK with the Node server's `/openai/v1` endpoint. Bring your own model keys and deploy on your own infrastructure.
 
 Use Open Managed Agents when you want:
 
 - A self-hosted Claude Managed Agents API implementation.
+- OpenAI Agents API support with durable sessions, function continuation, and subagent controls on Node.
 - An open-source, self-hosted Claude Tag-style workflow with BYOK model credentials.
 - MCP, private tools, encrypted vaults, and durable sessions under your own deployment boundary.
 
@@ -37,12 +39,55 @@ one that matches your hosting story:
 |---|---|---|
 | Where it lives | Your VPS / Mac / Docker host / fly.io / your k8s | Cloudflare Workers + DO + Containers |
 | Storage | SQLite or Postgres + local FS | D1 + KV + R2 |
-| Sandbox | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
+| Sandbox | LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
 | Time to running | `docker compose up` (~2 min) | wrangler deploy (~10 min once configured) |
 | Best for | OSS users, on-prem, no CF account, data-resident deploys | Edge scale, no host management, already on CF |
 
-**Same SDK.** Same `/v1/agents` / `/v1/sessions` API. Same Console UI. Same
-crash-recovery semantics. Switch between them by changing env vars, not code.
+Both hosts expose the Claude-compatible `/v1/agents` and `/v1/sessions` API
+and Console UI. The OpenAI Agents API adapter is currently mounted on the
+Node host at `/openai/v1`.
+
+---
+
+## OpenAI Agents API quickstart (Node)
+
+[Start a Node server with Docker](#quick-start-self-host-docker), create an
+OpenMA API key, and configure a model in your deployment. Then install the
+supported OpenAI SDK version:
+
+```bash
+npm install openai@7.15.0
+```
+
+Point the client at your OpenMA server:
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENMA_API_KEY,
+  baseURL: "http://localhost:8787/openai/v1",
+});
+
+const session = await client.beta.agents.sessions.create({
+  agent: { model: "your-configured-model", instructions: "Be concise." },
+  environment: { type: "none" },
+  input: "Hello",
+});
+console.log(session.id);
+```
+
+Sessions support text, function calls that wait for your application's result,
+and subagents. Set `agent.multi_agent.enabled: true` to let the main agent
+delegate subtasks. You can send input, wait, interrupt, close, and resume each
+child. Children keep separate conversations and share the parent's files;
+they cannot create more children.
+
+The OpenAI API currently runs on Node. Advanced environment and plugin settings,
+plus some MCP and model options, are not supported yet. Check the
+[supported features and limits](docs/openai-agents-compatibility-status.md)
+before migrating an existing application. See the
+[adapter guide](packages/openai-agents-compat/README.md) for configuration details.
 
 ---
 
@@ -63,8 +108,10 @@ $EDITOR .env
 #
 # Optional: ANTHROPIC_API_KEY lets the first agent run without a Model Card.
 # In production, add a Model Card per tenant from the Console instead.
+# SANDBOX_PROVIDER is required. Choose an isolated provider and add its config,
+# for example SANDBOX_PROVIDER=e2b plus E2B_API_KEY.
 
-# SQLite + LocalSubprocess sandbox (default — fastest path)
+# SQLite + an explicitly configured isolated sandbox
 docker compose up -d
 
 # Or Postgres backend
@@ -184,7 +231,7 @@ A **meta-harness** is not an agent — it's the platform that runs agents. It de
 ├─────────────────────────────────────────────────────────┤
 │  Infrastructure (Cloudflare or Node self-host)          │
 │  - Event log: Durable-Object SQLite (CF) or SQLite/Pg   │
-│  - Sandbox: CF Containers / subprocess / LiteBox / E2B  │
+│  - Sandbox: CF Containers / LiteBox / E2B / Daytona     │
 │  - Storage: KV + R2 (CF) or local FS (self-host)        │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -255,7 +302,10 @@ The harness is bundled into the agent worker at build time. Your code runs in th
 
 ## API
 
-Compatible with the [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents). Same endpoints, same event types, works with existing SDKs.
+The endpoints below expose the [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents) at `/v1`.
+The Node host also supports the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview)
+at `/openai/v1`; see the [OpenAI SDK quickstart](#openai-agents-api-quickstart-node)
+for its separate resource and event contract.
 
 <details>
 <summary><strong>Agents</strong> — Create and manage agent configurations</summary>
@@ -414,9 +464,11 @@ OMA registers any [Model Context Protocol](https://modelcontextprotocol.io) serv
 | Transport | When to use | How |
 |---|---|---|
 | HTTP / SSE | Hosted MCP servers (Linear, GitHub Copilot, Notion, …) | `{"type":"url","url":"https://mcp.linear.app/mcp"}` |
-| stdio | npm / PyPI MCP packages with no hosted endpoint | `{"type":"stdio","command":"uvx","args":[...],"port":8765}` — OMA spawns inside the sandbox container, talks to `127.0.0.1:port/sse` |
+| stdio | MCP processes already installed in the selected Environment | `{"type":"stdio","command":"/opt/mcp/bin/server","args":[...]}` — the sandbox Agent launches it and speaks MCP directly over stdin/stdout |
 
-Credentials never enter the sandbox; the outbound resolver matches by host and injects at forward time.
+URL-server credentials never enter the sandbox; the outbound resolver matches by host and injects at forward time. Values placed in a stdio server's `env` do enter the sandbox, so use only scoped values and never copy standing control-plane credentials there.
+
+The Environment, not the Agent declaration, owns stdio dependencies. Every OpenMA-managed base Environment ships Node.js/npm (`npx`) and uv (`uvx`); embedded sandbox adapters must preserve that contract by launching the corresponding OpenMA image, template, or snapshot. Additional tools belong in the Environment configuration. Only BYO images and external Workers are responsible for supplying the complete runtime themselves. OpenMA does not infer or install packages from `command`; a missing executable fails MCP startup visibly.
 
 | Auth mode | Configured as | Refresh |
 |---|---|---|
@@ -649,7 +701,7 @@ open-managed-agents/
 │   ├── api-types/                 # Shared TypeScript types (config schemas, events)
 │   ├── http-routes/               # Public REST route definitions (shared by main + main-node)
 │   ├── session-runtime/           # Harness runtime — event log, broadcast, recovery
-│   ├── sandbox/                   # Sandbox adapters (subprocess / litebox / daytona / e2b / boxrun)
+│   ├── sandbox/                   # Sandbox ports and provider-neutral orchestration
 │   ├── credentials-store/         # Encrypted credentials (AES-GCM under PLATFORM_ROOT_SECRET)
 │   ├── model-cards-store/         # Encrypted model-card API keys
 │   ├── vaults-store/              # Vault definitions + outbound auth wiring
@@ -676,7 +728,7 @@ The variables that gate boot and at-rest safety:
 | `ANTHROPIC_API_KEY` | No | Fallback LLM credential used when a tenant has not added a Model Card. **In production, add a Model Card per tenant from the Console** — the key is encrypted at rest under `PLATFORM_ROOT_SECRET`, scoped to the tenant, and rotatable without redeploy. |
 | `ANTHROPIC_BASE_URL` | No | Override for Anthropic-compatible proxies. |
 | `PUBLIC_BASE_URL` | No (dev) / Yes (prod) | Cookie domain + OAuth redirect base. Defaults to `*` trusted-origins — only safe for local dev. |
-| `SANDBOX_PROVIDER` | No | `subprocess` (default, no isolation), `litebox` (Firecracker), `daytona`, `e2b`, or `boxrun`. Use an isolated backend for untrusted agents. |
+| `SANDBOX_PROVIDER` | **Yes** (Node/Fly) | Explicit isolated backend: `litebox` (local Firecracker), `daytona`, `e2b`, or `boxrun`. Deployable entrypoints have no subprocess fallback. |
 | `TAVILY_API_KEY` | No | Backend for the `web_search` built-in tool. |
 
 Full list (integrations OAuth credentials, Postgres URL, sandbox tunables, memory-bucket config, Google sign-in, etc.) — see **[docs.openma.dev/reference/configuration](https://docs.openma.dev/reference/configuration/)** and `.env.example` / `.dev.vars.example`.
@@ -730,7 +782,14 @@ Keys are AES-256-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` (label `mode
 ```bash
 npm test          # unit + integration suite
 npm run typecheck # zero errors
+pnpm run test:openai-agents      # OpenAI SDK, HTTP and session behavior
+pnpm run test:openai-agents:node # Node execution and subagents
+pnpm run test:e2e:openai-agents # Production Node E2E with the official SDK
 ```
+
+See the [OpenAI compatibility report](docs/openai-agents-compatibility-status.md)
+and [upstream test audit](docs/openai-agents-upstream-test-audit.md) for the
+tested SDK version, coverage and known limits.
 
 ---
 

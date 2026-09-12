@@ -292,6 +292,9 @@ export const managed_environment_work = pgTable(
     sealed_secret: text("sealed_secret").notNull(),
     claim_at: bigint("claim_at", { mode: "number" }),
     claim_worker_id: text("claim_worker_id"),
+    claim_generation: bigint("claim_generation", { mode: "number" })
+      .notNull()
+      .default(0),
     heartbeat_ttl_seconds: bigint("heartbeat_ttl_seconds", {
       mode: "number",
     }).notNull(),

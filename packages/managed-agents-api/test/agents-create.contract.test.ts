@@ -4,6 +4,65 @@ import { agentView, agentWire, makeAgentsPort } from "./fixtures";
 import { buildAgentsTestApi } from "./test-api";
 
 describe("Managed Agents API — POST /v1/agents", () => {
+  it("rejects unknown roots, non-object provider options, and oversized metadata", async () => {
+    const createCalls: unknown[] = [];
+    const api = buildAgentsTestApi(
+      makeAgentsPort({
+        createAgent: async (input) => {
+          createCalls.push(input);
+          return { type: "created", agent: agentView };
+        },
+      }),
+    );
+    const request = (body: Record<string, unknown>) =>
+      api.request("/v1/agents", {
+        method: "POST",
+        headers: {
+          "anthropic-beta": "managed-agents-2026-04-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        custom_future_flag: true,
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: { id: "claude-opus-5", provider_options: [] },
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        metadata: Object.fromEntries(
+          Array.from({ length: 17 }, (_, index) => [`key-${index}`, "value"]),
+        ),
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        metadata: { ["k".repeat(65)]: "value" },
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        metadata: { key: "v".repeat(513) },
+      })).status,
+    ).toBe(400);
+    expect(createCalls).toEqual([]);
+  });
+
   it("rejects requests that omit the managed-agents beta header", async () => {
     const createCalls: unknown[] = [];
     const api = buildAgentsTestApi(
@@ -90,6 +149,13 @@ describe("Managed Agents API — POST /v1/agents", () => {
         model: "claude-opus-5",
         mcp_servers: [
           { type: "url", name: "docs", url: "https://mcp.example.test" },
+          {
+            type: "stdio",
+            name: "workspace",
+            command: "/usr/local/bin/workspace-mcp",
+            args: ["--root", "/workspace"],
+            env: { LOG_LEVEL: "info" },
+          },
         ],
         multiagent: {
           type: "coordinator",
@@ -131,6 +197,13 @@ describe("Managed Agents API — POST /v1/agents", () => {
         model: "claude-opus-5",
         mcpServers: [
           { type: "url", name: "docs", url: "https://mcp.example.test" },
+          {
+            type: "stdio",
+            name: "workspace",
+            command: "/usr/local/bin/workspace-mcp",
+            args: ["--root", "/workspace"],
+            env: { LOG_LEVEL: "info" },
+          },
         ],
         multiagent: {
           type: "coordinator",
@@ -230,13 +303,185 @@ describe("Managed Agents API — POST /v1/agents", () => {
     expect(createCalls).toEqual([]);
   });
 
-  it("rejects OMA extension fields on the Managed Agents endpoint", async () => {
+  it("maps the namespaced OpenMA extension without changing the Managed Agents route", async () => {
+    const createCalls: unknown[] = [];
+    const extendedAgent = {
+      ...agentView,
+      model: {
+        ...agentView.model,
+        providerOptions: { anthropic: { beta: ["context-1m"] } },
+      },
+      openma: {
+        auxiliaryModel: {
+          id: "deepseek-chat",
+          speed: "fast" as const,
+          providerOptions: {
+            deepseek: { thinking: { type: "disabled" } },
+          },
+        },
+        appendablePrompts: ["prompt_review"],
+        harness: "acp-sandbox",
+        acp: {
+          agent: {
+            id: "pi",
+            command: "pi-acp",
+            args: ["--stdio"],
+            env: { PI_PROFILE: "managed" },
+            cwd: "/workspace",
+          },
+          restart: { mode: "on-crash" as const, maxRestarts: 2, windowMs: 60_000 },
+          idleTimeoutMs: 30_000,
+          perTurnTimeoutMs: 120_000,
+        },
+        runtimeBinding: {
+          runtimeId: "runtime_pi",
+          acpAgentId: "pi",
+          localSkillBlocklist: ["unsafe-local-skill"],
+        },
+        enableGeneralSubagent: true,
+      },
+    };
+    const api = buildAgentsTestApi(
+      makeAgentsPort({
+        createAgent: async (input) => {
+          createCalls.push(input);
+          return { type: "created", agent: extendedAgent };
+        },
+      }),
+    );
+
+    const response = await api.request("/v1/agents", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "managed-agents-2026-04-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Coding Assistant",
+        model: {
+          id: "claude-opus-5",
+          provider_options: { anthropic: { beta: ["context-1m"] } },
+        },
+        _oma: {
+          aux_model: {
+            id: "deepseek-chat",
+            speed: "fast",
+            provider_options: {
+              deepseek: { thinking: { type: "disabled" } },
+            },
+          },
+          appendable_prompts: ["prompt_review"],
+          harness: "acp-sandbox",
+          acp: {
+            agent: {
+              id: "pi",
+              command: "pi-acp",
+              args: ["--stdio"],
+              env: { PI_PROFILE: "managed", REMOVE_ME: null },
+              cwd: "/workspace",
+            },
+            restart: { mode: "on-crash", max_restarts: 2, window_ms: 60_000 },
+            idle_timeout_ms: 30_000,
+            per_turn_timeout_ms: 120_000,
+          },
+          runtime_binding: {
+            runtime_id: "runtime_pi",
+            acp_agent_id: "pi",
+            local_skill_blocklist: ["unsafe-local-skill"],
+          },
+          enable_general_subagent: true,
+        },
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(createCalls).toEqual([
+      {
+        name: "Coding Assistant",
+        model: {
+          id: "claude-opus-5",
+          providerOptions: { anthropic: { beta: ["context-1m"] } },
+        },
+        openma: {
+          auxiliaryModel: {
+            id: "deepseek-chat",
+            speed: "fast",
+            providerOptions: {
+              deepseek: { thinking: { type: "disabled" } },
+            },
+          },
+          appendablePrompts: ["prompt_review"],
+          harness: "acp-sandbox",
+          acp: {
+            agent: {
+              id: "pi",
+              command: "pi-acp",
+              args: ["--stdio"],
+              env: { PI_PROFILE: "managed" },
+              cwd: "/workspace",
+            },
+            restart: { mode: "on-crash", maxRestarts: 2, windowMs: 60_000 },
+            idleTimeoutMs: 30_000,
+            perTurnTimeoutMs: 120_000,
+          },
+          runtimeBinding: {
+            runtimeId: "runtime_pi",
+            acpAgentId: "pi",
+            localSkillBlocklist: ["unsafe-local-skill"],
+          },
+          enableGeneralSubagent: true,
+        },
+      },
+    ]);
+    const mappedEnvironment = (createCalls[0] as {
+      openma: { acp: { agent: { env: Record<string, string> } } };
+    }).openma.acp.agent.env;
+    expect(Object.hasOwn(mappedEnvironment, "REMOVE_ME")).toBe(false);
+    expect(await response.json()).toEqual({
+      ...agentWire,
+      model: {
+        ...agentWire.model,
+        provider_options: { anthropic: { beta: ["context-1m"] } },
+      },
+      _oma: {
+        aux_model: {
+          id: "deepseek-chat",
+          speed: "fast",
+          provider_options: {
+            deepseek: { thinking: { type: "disabled" } },
+          },
+        },
+        appendable_prompts: ["prompt_review"],
+        harness: "acp-sandbox",
+        acp: {
+          agent: {
+            id: "pi",
+            command: "pi-acp",
+            args: ["--stdio"],
+            env: { PI_PROFILE: "managed" },
+            cwd: "/workspace",
+          },
+          restart: { mode: "on-crash", max_restarts: 2, window_ms: 60_000 },
+          idle_timeout_ms: 30_000,
+          per_turn_timeout_ms: 120_000,
+        },
+        runtime_binding: {
+          runtime_id: "runtime_pi",
+          acp_agent_id: "pi",
+          local_skill_blocklist: ["unsafe-local-skill"],
+        },
+        enable_general_subagent: true,
+      },
+    });
+  });
+
+  it("rejects unknown fields inside the OpenMA namespace", async () => {
     const createCalls: unknown[] = [];
     const api = buildAgentsTestApi(
       makeAgentsPort({
         createAgent: async (input) => {
           createCalls.push(input);
-          throw new Error("agent create port must not run for an invalid request");
+          throw new Error("agent create port must not run for an invalid extension");
         },
       }),
     );
@@ -250,7 +495,7 @@ describe("Managed Agents API — POST /v1/agents", () => {
       body: JSON.stringify({
         name: "Coding Assistant",
         model: "claude-opus-5",
-        _oma: { harness: "acp-proxy" },
+        _oma: { unreviewed_passthrough: true },
       }),
     });
 
@@ -259,7 +504,7 @@ describe("Managed Agents API — POST /v1/agents", () => {
       type: "error",
       error: {
         type: "invalid_request_error",
-        message: expect.stringContaining("_oma"),
+        message: expect.stringContaining("unreviewed_passthrough"),
       },
     });
     expect(createCalls).toEqual([]);
@@ -351,6 +596,38 @@ describe("Managed Agents API — POST /v1/agents", () => {
         model: "claude-opus-5",
         mcp_servers: [{ name: "missing-url", type: "url" }],
         tools: [{}],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(createCalls).toEqual([]);
+  });
+
+  it("rejects a relative stdio executable before persistence", async () => {
+    const createCalls: unknown[] = [];
+    const api = buildAgentsTestApi(
+      makeAgentsPort({
+        createAgent: async (input) => {
+          createCalls.push(input);
+          return { type: "created", agent: agentView };
+        },
+      }),
+    );
+
+    const response = await api.request("/v1/agents", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "managed-agents-2026-04-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Coding Assistant",
+        model: "claude-opus-5",
+        mcp_servers: [{
+          name: "workspace",
+          type: "stdio",
+          command: "workspace-mcp",
+        }],
       }),
     });
 

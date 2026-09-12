@@ -1,14 +1,14 @@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { Controller, useFieldArray, useForm, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { ArchiveIcon, TrashIcon } from "lucide-react";
 import type { SessionCreateParams } from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
-import { useApi, ApiError } from "../lib/api";
+import { ApiError } from "../lib/api";
 import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { useManagedApi } from "../lib/useManagedApi";
 import { Modal } from "../components/Modal";
@@ -30,14 +30,6 @@ interface MemoryStorePick { id: string; name: string; }
 type AgentLite = {
   id: string;
   name: string;
-  // Present iff the agent is bound to a user-registered runtime
-  // (acp-proxy harness). The New Session dialog reads this to decide
-  // whether to show the Environment picker — local-runtime sessions
-  // don't run a sandbox container so there's nothing to pick.
-  runtime_binding?: { runtime_id: string; acp_agent_id: string };
-};
-type OmaAgentLite = AgentLite & {
-  _oma?: { runtime_binding?: AgentLite["runtime_binding"] };
 };
 
 // Session status options for the toolbar status chip. "any" maps to no
@@ -89,13 +81,9 @@ const ResourceSchema = z.discriminatedUnion("kind", [
   MemoryStoreResourceSchema,
 ]);
 
-/** Base form schema. `environment_id` is conditionally required at runtime
- *  (only when the picked agent is NOT a local-runtime agent) — see the
- *  superRefine wired up in the component, which reads a ref kept in sync
- *  with the live `isLocalRuntime` derivation. */
 const FormSchema = z.object({
   agent: z.string().min(1, "Select an agent"),
-  environment_id: z.string(),
+  environment_id: z.string().min(1, "Select an environment"),
   title: z.string(),
   vault_ids: z.array(z.string()),
   resources: z.array(ResourceSchema),
@@ -212,14 +200,9 @@ function EvalBadge({ metadata }: { metadata?: Record<string, string> }) {
 }
 
 export function SessionsList() {
-  const { api } = useApi();
   const managedApi = useManagedApi();
   const nav = useNavigate();
   const [agents, setAgents] = useState<AgentLite[]>([]);
-  // Set by the agent Combobox when the user picks an agent. Carries the
-  // full row so we can read `runtime_binding` without keeping every agent
-  // preloaded in `agents[]`.
-  const [selectedAgentDetail, setSelectedAgentDetail] = useState<AgentLite | null>(null);
   // Agent's MCP servers (from /v1/agents/{id} fetched on pick). Used to
   // warn the user when their selected vaults don't carry credentials for
   // a server the agent is configured to use — agent will hit those MCP
@@ -282,13 +265,6 @@ export function SessionsList() {
   } = useInfiniteApiQuery<Session>("/v1/sessions", { limit: 20, params: sessionsParams });
 
   // ── Form (react-hook-form + zod) ──
-  // The schema's `environment_id` requirement depends on whether the
-  // currently picked agent is a local-runtime agent — a runtime fact the
-  // schema can't see on its own. We close over a ref that the component
-  // keeps in sync with the live `isLocalRuntime` derivation (see below).
-  // Stable resolver = stable useForm config; we call `trigger()` from a
-  // useEffect when isLocalRuntime flips to refresh the conditional error.
-  const isLocalRuntimeRef = useRef(false);
   const resolver = useMemo(
     () =>
       // Cast addresses a workspace zod version skew: the resolver's bundled
@@ -296,17 +272,7 @@ export function SessionsList() {
       // version.minor=3) while console's own zod is 4.4.x (minor=4). Both
       // are wire-compatible at runtime; only the structural type guard on
       // _zod.version trips. No behavior change.
-      zodResolver(
-        FormSchema.superRefine((data, ctx) => {
-          if (!isLocalRuntimeRef.current && !data.environment_id) {
-            ctx.addIssue({
-              code: "custom",
-              path: ["environment_id"],
-              message: "Select an environment",
-            });
-          }
-        }) as never,
-      ) as Resolver<FormValues>,
+      zodResolver(FormSchema as never) as Resolver<FormValues>,
     [],
   );
 
@@ -322,7 +288,6 @@ export function SessionsList() {
     getValues,
     setValue,
     reset,
-    trigger,
     watch,
     formState,
   } = form;
@@ -342,7 +307,7 @@ export function SessionsList() {
   const watchedResources = watch("resources");
 
   // Fetch the picked agent's mcp_servers list. Combobox only carries the
-  // light row (id/name/runtime_binding); we need the full row to know
+  // light row (id/name); we need the full row to know
   // which MCP endpoints the agent will dial. Refetch on agent change;
   // clear on unselect.
   useEffect(() => {
@@ -420,44 +385,11 @@ export function SessionsList() {
     return missing;
   }, [agentMcpUrls, watchedVaultIds, vaultCredHosts]);
 
-  // Computed: which agent is selected, and is it bound to a local runtime?
-  // The Environment picker, the schema's env_id requirement, and the
-  // request body all key off this single source of truth.
-  // Prefer the full row captured by the Combobox onValueChange callback,
-  // but only when its id matches the form's current value (otherwise we'd
-  // hold a stale row across resets / programmatic agent changes). Fall
-  // back to the preloaded `agents` array, then to undefined while either
-  // resolves.
-  const selectedAgent = useMemo(() => {
-    const preloaded = agents.find((a) => a.id === watchedAgentId);
-    if (selectedAgentDetail && selectedAgentDetail.id === watchedAgentId) {
-      return {
-        ...preloaded,
-        ...selectedAgentDetail,
-        runtime_binding:
-          selectedAgentDetail.runtime_binding ?? preloaded?.runtime_binding,
-      };
-    }
-    return preloaded;
-  }, [selectedAgentDetail, agents, watchedAgentId]);
-  const isLocalRuntime = !!selectedAgent?.runtime_binding;
-
-  // Keep the resolver's closed-over ref aligned with the current render's
-  // value, then trigger a revalidation pass so formState.isValid reflects
-  // the new conditional rule immediately. Writing to a ref during render
-  // is safe (React docs: refs don't drive renders).
-  isLocalRuntimeRef.current = isLocalRuntime;
-  useEffect(() => {
-    void trigger();
-  }, [isLocalRuntime, trigger]);
-
   const loadAux = async () => {
     setAuxLoading(true);
     try {
-      const [a, omaAgents, e, v, f, m] = await Promise.all([
+      const [a, e, v, f, m] = await Promise.all([
         managedApi.agents.list({ limit: 200, include_archived: true }),
-        api<{ data: OmaAgentLite[] }>("/v1/oma/agents?limit=200&include_archived=true")
-          .catch(() => ({ data: [] })),
         managedApi.environments.list({ limit: 200 }),
         managedApi.vaults.list({ limit: 200 }).catch(() => ({ data: [], next_page: null })),
         managedApi.files.list({ limit: 200 }).catch(() => ({
@@ -465,15 +397,7 @@ export function SessionsList() {
         })),
         managedApi.memoryStores.list({ limit: 200 }).catch(() => ({ data: [], next_page: null })),
       ]);
-      const extensionById = new Map(omaAgents.data.map((agent) => [agent.id, agent]));
-      setAgents(
-        a.data.map((agent) => {
-          const extension = extensionById.get(agent.id);
-          const runtimeBinding =
-            extension?._oma?.runtime_binding ?? extension?.runtime_binding;
-          return runtimeBinding ? { ...agent, runtime_binding: runtimeBinding } : agent;
-        }),
-      );
+      setAgents(a.data);
       setEnvs(e.data);
       setVaults(v.data);
       setFiles(f.data);
@@ -490,7 +414,6 @@ export function SessionsList() {
   const closeModal = useCallback(() => {
     setShowCreate(false);
     reset(INITIAL_FORM_VALUES);
-    setSelectedAgentDetail(null);
     setAgentMcpUrls([]);
     setVaultCredHosts({});
     setRevealedSecrets(new Set());
@@ -505,7 +428,6 @@ export function SessionsList() {
       agent: agents[0]?.id ?? "",
       environment_id: envs[0]?.id ?? "",
     });
-    setSelectedAgentDetail(null);
     setAgentMcpUrls([]);
     setVaultCredHosts({});
     setRevealedSecrets(new Set());
@@ -562,15 +484,7 @@ export function SessionsList() {
       if (data.vault_ids.length > 0) body.vault_ids = data.vault_ids;
       if (resources.length > 0) body.resources = resources;
 
-      const session = isLocalRuntime
-        ? await api<Session>("/v1/oma/sessions", {
-            method: "POST",
-            body: JSON.stringify({
-              ...body,
-              environment_id: data.environment_id || undefined,
-            }),
-          })
-        : await managedApi.sessions.create(body);
+      const session = await managedApi.sessions.create(body);
       closeModal();
       nav(`/sessions/${session.id}`);
     } catch (err) {
@@ -787,7 +701,7 @@ export function SessionsList() {
         ),
       },
     ],
-    [api, refreshSessions],
+    [refreshSessions],
   );
 
   const hasActiveFilter = !!search || !!filterAgent || status !== "any" || created.after !== undefined || created.before !== undefined;
@@ -880,9 +794,8 @@ export function SessionsList() {
                 <>
                   <Combobox<AgentLite>
                     value={field.value}
-                    onValueChange={(v, item) => {
+                    onValueChange={(v) => {
                       field.onChange(v);
-                      if (item) setSelectedAgentDetail(item);
                     }}
                     endpoint="/v1/agents"
                     getValue={(a) => a.id}
@@ -901,13 +814,7 @@ export function SessionsList() {
               )}
             />
           </div>
-          {/* Environment picker is for cloud sandbox lanes — local-runtime
-              agents (acp-proxy harness) run on the user's daemon and
-              never touch a cloud sandbox, so the picker is hidden in
-              that mode. Server picks a tenant fallback when env_id is
-              omitted; see sessions.ts:resolvedEnvId. */}
-          {!isLocalRuntime && (
-            <div>
+          <div>
               <div className="flex items-center justify-between mb-1">
                 <Label className="text-sm text-fg-muted">Environment</Label>
                 <a href="/environments" className="text-xs text-brand hover:underline">Manage environments →</a>
@@ -936,13 +843,7 @@ export function SessionsList() {
                   </>
                 )}
               />
-            </div>
-          )}
-          {isLocalRuntime && (
-            <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-              Local runtime agents use the runtime machine's filesystem — no cloud environment needed.
-            </p>
-          )}
+          </div>
           <div>
             <Label htmlFor="session-title" className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></Label>
             {/* autoComplete=off + an unrecognised name to defeat Chrome /

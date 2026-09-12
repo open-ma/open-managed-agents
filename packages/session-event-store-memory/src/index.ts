@@ -96,6 +96,7 @@ export class MemorySessionEventStore implements SessionEventStore {
       .filter((event) => input.createdBefore === undefined || processedAt(event) < input.createdBefore)
       .filter((event) => input.createdAtOrBefore === undefined || processedAt(event) <= input.createdAtOrBefore)
       .filter((event) => input.types === undefined || input.types.includes(event.type))
+      .filter((event) => input.idPrefix === undefined || event.id.startsWith(input.idPrefix))
       .filter((event) => position === undefined || direction * compareEvents(event, position) > 0)
       .sort((left, right) => direction * compareEvents(left, right))
       .slice(0, input.limit)

@@ -1,0 +1,19 @@
+{
+  "name": "@open-managed-agents/environment-activation-store-sql",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/managed-runtime-host": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^13.0.3",
+    "vitest": "^4.1.3"
+  }
+}

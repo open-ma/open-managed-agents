@@ -9,6 +9,7 @@ import { generateText, stepCountIs, streamText, tool } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import * as piProviderModule from "../src/harness/pi-provider";
+import mockServices, { type Env as MockServicesEnv } from "../../../test/mocks/mock-server/index";
 
 const { createPiModelRuntime, withPiRuntimeRequestOptions } = piProviderModule;
 
@@ -105,6 +106,53 @@ describe("createPiModelRuntime", () => {
     } as Parameters<typeof createPiModelRuntime>[0] & { thinkingLevel: "high" });
 
     expect(Reflect.get(runtime, "thinkingLevel")).toBe("high");
+  });
+
+  it("applies per-agent Pi provider options to every request", () => {
+    const runtime = createPiModelRuntime({
+      model: "deepseek-v4-flash",
+      apiKey: "secret",
+      provider: "deepseek",
+      providerOptions: {
+        reasoning: "off",
+        samplingParams: { temperature: 0 },
+      },
+    } as Parameters<typeof createPiModelRuntime>[0] & {
+      providerOptions: {
+        reasoning: "off";
+        samplingParams: { temperature: number };
+      };
+    });
+
+    expect(withPiRuntimeRequestOptions(runtime, { maxTokens: 128 })).toMatchObject({
+      reasoning: "off",
+      samplingParams: { temperature: 0 },
+      maxTokens: 128,
+    });
+  });
+
+  it("keeps per-agent Pi provider options when fast speed decorates an OpenAI-compatible request", () => {
+    const runtime = createPiModelRuntime({
+      model: "deepseek-v4-flash",
+      apiKey: "secret",
+      provider: "deepseek",
+      speed: "fast",
+      providerOptions: {
+        reasoning: "off",
+        samplingParams: { temperature: 0 },
+      },
+    } as Parameters<typeof createPiModelRuntime>[0] & {
+      providerOptions: {
+        reasoning: "off";
+        samplingParams: { temperature: number };
+      };
+    });
+
+    expect(withPiRuntimeRequestOptions(runtime, { maxTokens: 128 })).toMatchObject({
+      reasoning: "off",
+      samplingParams: { temperature: 0 },
+      maxTokens: 128,
+    });
   });
 
   it("projects Managed Agents fast speed through Pi into the Anthropic request", async () => {
@@ -357,6 +405,50 @@ describe("createPiModelRuntime", () => {
     );
   });
 
+  it("completes a streamed Anthropic tool loop through the real Pi protocol adapter", async () => {
+    const repositorySha = "9e79e0dd41e23a8900b0b4adec5f55e4ecf24529";
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+      mockServices.fetch(new Request(input, init), {} as MockServicesEnv));
+    try {
+      const runtime = createPiModelRuntime({
+        model: "openma-e2e-inputs",
+        apiKey: "fixture",
+        provider: "ant-compatible",
+        baseURL: "https://mock.test",
+      });
+      const candidate = Reflect.get(piProviderModule, "toAiSdkLanguageModel");
+      expect(typeof candidate).toBe("function");
+      if (typeof candidate !== "function") return;
+      const executeBash = vi.fn(async () => "FILES_REPO_SKILL_MEMORY_OUTPUT_OK");
+      const executeMcp = vi.fn(async () => "MCP_PROXY_OK");
+      const model = candidate(runtime) as LanguageModel;
+      const result = streamText({
+        model,
+        prompt: `Expected repository SHA: ${repositorySha}`,
+        tools: {
+          bash: tool({
+            inputSchema: z.object({ command: z.string() }),
+            execute: executeBash,
+          }),
+          mcp__certification__echo: tool({
+            inputSchema: z.object({ value: z.string() }),
+            execute: executeMcp,
+          }),
+        },
+        stopWhen: stepCountIs(3),
+      });
+
+      await expect(result.text).resolves.toBe("ALL_INPUTS_OK");
+      expect(executeBash).toHaveBeenCalledOnce();
+      expect(executeMcp).toHaveBeenCalledWith(
+        { value: "MCP_INPUT_OK" },
+        expect.objectContaining({ toolCallId: "toolu_mock_1" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps Pi stream errors serializable across the AI SDK projection", async () => {
     const faux = fauxProvider({ tokensPerSecond: 100_000 });
     faux.setResponses([
@@ -371,6 +463,7 @@ describe("createPiModelRuntime", () => {
       models,
       model: faux.getModel(),
       thinkingLevel: "off",
+      speed: "standard",
     });
     const result = streamText({ model, prompt: "trigger the error" });
     const errors: unknown[] = [];

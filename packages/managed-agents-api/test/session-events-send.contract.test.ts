@@ -5,6 +5,12 @@ import { sessionWire } from "./session-fixtures";
 import { buildSessionEventsTestApi } from "./test-api";
 
 describe("Managed Agents API — POST /v1/sessions/:session_id/events", () => {
+  it.each(["version_conflict", "idempotency_conflict"] as const)("preserves native %s as HTTP 409", async type => {
+    const api = buildSessionEventsTestApi(makeSessionEventsPort({ sendSessionEvents: async () => ({ type, message: "Input conflicts with the accepted Session state" }) }));
+    const client = new Anthropic({ apiKey: "test-key", baseURL: "http://openma.test", maxRetries: 0, fetch: async (input, init) => api.fetch(new Request(input, init)) });
+    await expect(client.beta.sessions.events.send(sessionWire.id, { events: [{ type: "user.message", content: [{ type: "text", text: "hello" }] }] })).rejects.toMatchObject({ status: 409 });
+  });
+
   it("maps user.tool_result followed by its final system.message", async () => {
     const sendCalls: unknown[] = [];
     const port = makeSessionEventsPort({

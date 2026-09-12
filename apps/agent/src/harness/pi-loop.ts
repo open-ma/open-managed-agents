@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import {
   Type,
   type Api,
@@ -9,6 +9,7 @@ import {
   type TextContent,
   type ToolResultMessage,
   type Usage,
+  isContextOverflow,
 } from "@earendil-works/pi-ai";
 import type { ModelMessage } from "ai";
 import { z } from "zod";
@@ -20,6 +21,11 @@ import {
 } from "@open-managed-agents/shared";
 import { eventsToMessagesAsync } from "../runtime/history";
 import type { HarnessContext, HarnessInterface } from "./interface";
+import {
+  resolvePiCompactionPolicy,
+  type PiCompactionPolicy,
+  type PiCompactionResult,
+} from "./pi-compaction";
 import { withPiRuntimeRequestOptions } from "./pi-provider";
 
 const EMPTY_USAGE: Usage = {
@@ -39,6 +45,16 @@ interface LiveMessageState {
   toolIds: Map<number, string>;
 }
 
+interface PiRunOutcome {
+  producedOutput: boolean;
+  providerFailure?: AssistantMessage;
+}
+
+export interface PiHarnessOptions {
+  /** Replace the required default policy; the compaction capability remains active. */
+  compaction?: PiCompactionPolicy;
+}
+
 /**
  * Pi-backed implementation of the OpenMA Harness Port.
  *
@@ -47,20 +63,42 @@ interface LiveMessageState {
  * OpenMA history in, canonical OpenMA events out.
  */
 export class PiHarness implements HarnessInterface {
+  constructor(private readonly options: PiHarnessOptions = {}) {}
+
   async run(ctx: HarnessContext): Promise<void> {
     if (!ctx.pi) {
       throw new ModelError("Pi harness requires a tenant-scoped Pi model runtime");
     }
 
-    const modelMessages = await eventsToMessagesAsync(
-      ctx.runtime.history.getEvents(),
-      ctx.fileFetcher,
-    );
-    const messages = modelMessagesToPi(modelMessages, ctx.pi.model);
+    const proactivelyCompacted = await this.compactBeforeTurn(ctx);
+    let outcome = await this.runAgentOnce(ctx);
+    if (
+      outcome.providerFailure
+      && !outcome.producedOutput
+      && !proactivelyCompacted
+      && !ctx.runtime.abortSignal?.aborted
+      && isContextOverflow(outcome.providerFailure, ctx.pi.model.contextWindow)
+    ) {
+      const recovered = await this.compactBeforeTurn(ctx, true);
+      if (recovered) outcome = await this.runAgentOnce(ctx);
+    }
+
+    if (outcome.providerFailure && !ctx.runtime.abortSignal?.aborted) {
+      const message = outcome.providerFailure.errorMessage ?? "Pi provider request failed";
+      const external = classifyExternalError(new Error(message));
+      throw external instanceof Error ? external : new ModelError(message);
+    }
+    if (!outcome.producedOutput && !ctx.runtime.abortSignal?.aborted) {
+      throw new ModelError("No output generated. Check the Pi stream for errors.");
+    }
+  }
+
+  private async runAgentOnce(ctx: HarnessContext): Promise<PiRunOutcome> {
+    const modelMessages = await eventsToMessagesAsync(ctx.runtime.history.getEvents(), ctx.fileFetcher);
+    const messages = modelMessagesToPi(modelMessages, ctx.pi!.model);
     if (messages.length === 0) {
       throw new ModelError("Pi harness cannot continue without a user message");
     }
-
     const state: LiveMessageState = {
       spanId: null,
       firstTokenSeen: false,
@@ -68,16 +106,17 @@ export class PiHarness implements HarnessInterface {
       thinkingIds: new Map(),
       toolIds: new Map(),
     };
-    let providerFailure: string | null = null;
+    let providerFailure: AssistantMessage | undefined;
     let producedOutput = false;
 
     const agent = new Agent({
       initialState: {
         systemPrompt: ctx.systemPrompt,
-        model: ctx.pi.model,
+        model: ctx.pi!.model,
         messages,
         tools: toolsToPi(ctx),
-        thinkingLevel: ctx.pi.thinkingLevel,
+        // The tenant runtime maps effort to the model's supported Pi level.
+        thinkingLevel: ctx.pi!.thinkingLevel,
       },
       sessionId: ctx.session_id,
       streamFn: (model, context, options) =>
@@ -108,15 +147,66 @@ export class PiHarness implements HarnessInterface {
       await closeLiveStreams(ctx, state, ctx.runtime.abortSignal?.aborted ? "aborted" : "completed");
     }
 
-    if (providerFailure && !ctx.runtime.abortSignal?.aborted) {
-      const external = classifyExternalError(new Error(providerFailure));
-      throw external instanceof Error
-        ? external
-        : new ModelError(providerFailure);
+    return { producedOutput, ...(providerFailure ? { providerFailure } : {}) };
+  }
+
+  private async compactBeforeTurn(ctx: HarnessContext, force: boolean = false): Promise<boolean> {
+    const policy = this.options.compaction === undefined
+      ? resolvePiCompactionPolicy((ctx.agent.metadata ?? {}) as Record<string, unknown>)
+      : this.options.compaction;
+    if (!ctx.pi) return false;
+
+    const events = ctx.runtime.history.getEvents();
+    const modelMessages = await eventsToMessagesAsync(events, ctx.fileFetcher);
+    const messages = modelMessagesToPi(modelMessages, ctx.pi.model);
+    const contextWindowTokens = ctx.pi.model.contextWindow || 128_000;
+    if (!force && !policy.shouldCompact(events, { messages, contextWindowTokens })) return false;
+
+    try {
+      const result = await policy.compact(events, {
+        messages,
+        contextWindowTokens,
+        models: ctx.pi.models,
+        model: ctx.pi.model,
+        systemPrompt: ctx.systemPrompt,
+        tools: toolsToPi(ctx),
+        runtime: ctx.runtime,
+        sessionId: ctx.session_id,
+        abortSignal: ctx.runtime.abortSignal,
+        requestOptions: withPiRuntimeRequestOptions(ctx.pi, {
+          ...(ctx.pi.thinkingLevel === "off" ? {} : { reasoning: ctx.pi.thinkingLevel }),
+        }),
+      });
+      return this.persistCompaction(result, ctx);
+    } catch (error) {
+      // Context compaction is a best-effort optimization. The canonical
+      // history remains untouched when a policy/model fails, so the main
+      // turn can still run and a later turn can retry.
+      console.warn(`[pi-compact] ${policy.name} failed: ${(error as Error).message}`);
+      return false;
     }
-    if (!producedOutput && !ctx.runtime.abortSignal?.aborted) {
-      throw new ModelError("No output generated. Check the Pi stream for errors.");
-    }
+  }
+
+  private persistCompaction(
+    result: PiCompactionResult | null,
+    ctx: HarnessContext,
+  ): boolean {
+    if (!result) return false;
+    const hasContent = result.summary.some(
+      (block) => (block.type === "text" && block.text.trim().length > 0)
+        || block.type === "image"
+        || block.type === "document",
+    );
+    if (!hasContent) return false;
+    ctx.runtime.broadcast({
+      type: "agent.thread_context_compacted",
+      original_message_count: result.original_message_count,
+      compacted_message_count: result.compacted_message_count,
+      summary: result.summary,
+      trigger: "auto",
+      pre_tokens: result.pre_tokens,
+    });
+    return true;
   }
 }
 
@@ -124,7 +214,7 @@ async function translatePiEvent(
   event: AgentEvent,
   ctx: HarnessContext,
   state: LiveMessageState,
-): Promise<{ producedOutput: boolean; providerFailure?: string }> {
+): Promise<{ producedOutput: boolean; providerFailure?: AssistantMessage }> {
   const runtime = ctx.runtime;
   const modelId = ctx.pi!.model.id;
   let producedOutput = false;
@@ -262,7 +352,7 @@ async function translatePiEvent(
     return {
       producedOutput,
       ...(message.stopReason === "error"
-        ? { providerFailure: message.errorMessage ?? "Pi provider request failed" }
+        ? { providerFailure: message }
         : {}),
     };
   }
@@ -432,7 +522,7 @@ function piContentToWire(content: Array<TextContent | ImageContent>): ContentBlo
 function modelMessagesToPi(
   messages: ModelMessage[],
   model: Model<Api>,
-): AgentMessage[] {
+): Message[] {
   const now = Date.now();
   return messages.flatMap((message, index): Message[] => {
     const timestamp = now + index;

@@ -88,6 +88,43 @@ describe("Permission policy enforcement", () => {
     expect(getToolPermission(config, "read")).toBe("always_ask");
   });
 
+  it("resolves an MCP permission from its matching server toolset", () => {
+    const config = makeAgentConfig({
+      tools: [
+        {
+          type: "agent_toolset_20260401",
+          default_config: { enabled: true, permission_policy: { type: "always_allow" } },
+        },
+        {
+          type: "mcp_toolset",
+          mcp_server_name: "docs",
+          default_config: { enabled: true, permission_policy: { type: "always_ask" } },
+        },
+      ],
+    });
+
+    expect(getToolPermission(config, "mcp__docs__search_docs")).toBe("always_ask");
+  });
+
+  it("resolves an MCP per-tool permission using the remote tool name", () => {
+    const config = makeAgentConfig({
+      tools: [
+        {
+          type: "mcp_toolset",
+          mcp_server_name: "docs",
+          default_config: { enabled: true, permission_policy: { type: "always_allow" } },
+          configs: [{
+            name: "search_docs",
+            enabled: true,
+            permission_policy: { type: "always_ask" },
+          }],
+        },
+      ],
+    });
+
+    expect(getToolPermission(config, "mcp__docs__search_docs")).toBe("always_ask");
+  });
+
   it("tool with always_ask has no execute function", async () => {
     const config = makeAgentConfig({
       tools: [{

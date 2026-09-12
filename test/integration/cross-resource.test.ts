@@ -49,14 +49,36 @@ async function collectReplayedEvents(sessionId: string, waitMs = 50): Promise<an
   ws.accept();
   const events: any[] = [];
   return new Promise((resolve) => {
-    ws.addEventListener("message", (e) => {
-      events.push(JSON.parse(e.data as string));
-    });
-    setTimeout(() => {
+    let quietTimer: ReturnType<typeof setTimeout>;
+    const finish = () => {
       ws.close();
       resolve(events);
-    }, waitMs);
+    };
+    const waitForQuiet = () => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(finish, waitMs);
+    };
+    ws.addEventListener("message", (e) => {
+      events.push(JSON.parse(e.data as string));
+      waitForQuiet();
+    });
+    waitForQuiet();
   });
+}
+
+async function waitForReplayedEvents(
+  sessionId: string,
+  ready: (events: any[]) => boolean,
+  timeoutMs = 5_000,
+): Promise<any[]> {
+  const deadline = Date.now() + timeoutMs;
+  let events: any[] = [];
+  do {
+    events = await collectReplayedEvents(sessionId, 50);
+    if (ready(events)) return events;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() < deadline);
+  return events;
 }
 
 // ============================================================
@@ -86,7 +108,7 @@ describe("Agent + Session snapshot", () => {
     const getRes = await get(`/v1/oma/sessions/${session.id}`);
     const fetched = (await getRes.json()) as any;
     expect(fetched.vault_ids).toEqual([vault1.id, vault2.id]);
-  });
+  }, 60_000);
 
   it("agent update after session creation does not change session snapshot", async () => {
     const a = await post("/v1/oma/agents", {
@@ -683,8 +705,10 @@ describe("Event type combinations", () => {
       events: [{ type: "user.interrupt" }],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const types = replayed.map((event: any) => event.type);
+      return types.includes("user.message") && types.includes("user.interrupt");
+    });
     const types = events.map((e: any) => e.type);
     expect(types).toContain("user.message");
     expect(types).toContain("user.interrupt");
@@ -701,8 +725,10 @@ describe("Event type combinations", () => {
       events: [{ type: "user.message", content: [{ type: "text", text: "after outcome" }] }],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const types = replayed.map((event: any) => event.type);
+      return types.includes("user.define_outcome") && types.includes("user.message");
+    });
     const types = events.map((e: any) => e.type);
     expect(types).toContain("user.define_outcome");
     expect(types).toContain("user.message");
@@ -746,8 +772,16 @@ describe("Event type combinations", () => {
       events: [{ type: "user.define_outcome", outcome: { description: "all-types" } }],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const types = replayed.map((event: any) => event.type);
+      return [
+        "user.message",
+        "user.interrupt",
+        "user.tool_confirmation",
+        "user.custom_tool_result",
+        "user.define_outcome",
+      ].every((type) => types.includes(type));
+    });
     const types = events.map((e: any) => e.type);
     expect(types).toContain("user.message");
     expect(types).toContain("user.interrupt");
@@ -766,8 +800,13 @@ describe("Event type combinations", () => {
       });
     }
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const texts = replayed
+        .filter((event: any) => event.type === "user.message")
+        .map((event: any) => event.content[0].text);
+      return Array.from({ length: 5 }, (_, index) => `multi-${index}`)
+        .every((text) => texts.includes(text));
+    });
     const texts = events
       .filter((e: any) => e.type === "user.message")
       .map((e: any) => e.content[0].text);

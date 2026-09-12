@@ -1,0 +1,17 @@
+{
+  "name": "@open-managed-agents/environment-dispatch-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/managed-runtime-host": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
+  }
+}

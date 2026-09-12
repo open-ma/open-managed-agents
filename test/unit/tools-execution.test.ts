@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { MockLanguageModelV3 } from "ai/test";
 import { buildTools } from "../../apps/agent/src/harness/tools";
 import { TestSandbox } from "../../apps/agent/src/runtime/sandbox";
 import { InMemoryHistory, eventsToMessages } from "../../apps/agent/src/runtime/history";
@@ -80,6 +81,33 @@ describe("Built-in tool execution", () => {
       TOOL_EXEC_OPTS
     );
     expect(capturedTimeout).toBe(60000);
+  });
+
+  it("bash tool uses bounded exec even when the sandbox exposes background processes", async () => {
+    let capturedTimeout: number | undefined;
+    let startProcessCalls = 0;
+    const sandbox: any = {
+      exec: async (_cmd: string, timeout?: number) => {
+        capturedTimeout = timeout;
+        return "exit=0\nforeground-complete";
+      },
+      startProcess: async () => {
+        startProcessCalls += 1;
+        throw new Error("background process path must not be used for foreground bash");
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.bash.execute(
+      { command: "echo foreground-complete", timeout: 25_000 },
+      TOOL_EXEC_OPTS,
+    );
+
+    expect(result).toBe("exit=0\nforeground-complete");
+    expect(capturedTimeout).toBe(25_000);
+    expect(startProcessCalls).toBe(0);
   });
 
   it("bash tool appends a retry hint after chained secret-backed command failure", async () => {
@@ -514,6 +542,46 @@ describe("Built-in tool execution", () => {
       TOOL_EXEC_OPTS
     );
     expect(capturedCmd).toContain("head -c 1000");
+  });
+
+  it("web_fetch passes auxiliary-model provider options to its summarize call", async () => {
+    const auxModel = new MockLanguageModelV3({
+      doGenerate: {
+        content: [{ type: "text", text: "summarized" }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 1, text: 1, reasoning: 0 },
+        },
+        warnings: [],
+      },
+    });
+    const sandbox: any = {
+      exec: async () => "exit=0\n",
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    vi.stubGlobal("fetch", async () => new Response("<html>large</html>", {
+      headers: { "content-type": "text/html" },
+    }));
+    try {
+      const providerOptions = { anthropic: { thinking: { type: "disabled" } } };
+      const tools = await buildTools(makeAgentConfig(), sandbox, {
+        toMarkdown: async () => ({ format: "markdown", data: "x".repeat(6000) }),
+        auxModel,
+        auxModelInfo: { model_id: "aux-model" },
+        auxProviderOptions: providerOptions,
+      });
+
+      await tools.web_fetch.execute(
+        { url: "https://example.com/large" },
+        TOOL_EXEC_OPTS,
+      );
+
+      expect(auxModel.doGenerateCalls[0]?.providerOptions).toEqual(providerOptions);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("web_search default (DDG) is defined in agent_toolset", async () => {

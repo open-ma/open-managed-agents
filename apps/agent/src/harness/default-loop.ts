@@ -1,5 +1,6 @@
 import { streamText, stepCountIs, wrapLanguageModel } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { HarnessInterface, HarnessContext, HarnessRuntime, FileResolver } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
 import { generateEventId, classifyExternalError, ModelError } from "@open-managed-agents/shared";
@@ -92,7 +93,7 @@ function emitToolCallEvent(
       name: toolName,
       input: callInput,
     });
-  } else if (isBuiltinTool(toolName)) {
+  } else if (isBuiltinTool(toolName) || tools[toolName]?.metadata?.openmaBuiltin === true) {
     const event: AgentToolUseEvent = {
       type: "agent.tool_use",
       id: toolCallId,
@@ -159,6 +160,7 @@ function emitToolResultEvent(
       type: "agent.mcp_tool_result",
       mcp_tool_use_id: toolCallId,
       content: typeof content === "string" ? content : JSON.stringify(content),
+      ...(part.type === "tool-error" && { is_error: true }),
       // v1-additive: causal predecessor is the matching agent.mcp_tool_use,
       // whose EventBase.id is set explicitly to toolCallId in
       // emitToolCallEvent above. Same identity, no extra plumbing.
@@ -169,6 +171,7 @@ function emitToolResultEvent(
       type: "agent.tool_result",
       tool_use_id: toolCallId,
       content,
+      ...(part.type === "tool-error" && { is_error: true }),
       // v1-additive: causal predecessor is the matching agent.tool_use,
       // whose EventBase.id is set explicitly to toolCallId in
       // emitToolCallEvent above. (AgentToolUseEvent.id overrides
@@ -261,6 +264,10 @@ export class DefaultHarness implements HarnessInterface {
 
   async run(ctx: HarnessContext): Promise<void> {
     const { agent, userMessage, runtime, tools, model, systemPrompt } = ctx;
+    const providerOptions =
+      typeof agent.model === "object"
+        ? agent.model.provider_options as SharedV3ProviderOptions | undefined
+        : undefined;
 
     // Resolve compaction params from agent config. Strategy class is
     // selectable via `agent.metadata.compaction_strategy` (defaults to
@@ -300,7 +307,12 @@ export class DefaultHarness implements HarnessInterface {
     const ctxWindow = resolveContextWindowTokens(model);
     if (this.shouldCompact && this.compact && this.shouldCompact(allEvents, { contextWindowTokens: ctxWindow })) {
       try {
-        await this.compact(allEvents, runtime, { model, systemPrompt, tools });
+        await this.compact(allEvents, runtime, {
+          model,
+          systemPrompt,
+          tools,
+          providerOptions,
+        });
       } catch (err) {
         // Compaction is best-effort. Log and continue — the next turn will
         // try again. Don't fail the whole turn over a summarize error.
@@ -427,6 +439,7 @@ export class DefaultHarness implements HarnessInterface {
         : undefined,
       messages: finalMessages,
       tools: cached.tools,
+      providerOptions,
       stopWhen: stepCountIs(100),
       abortSignal: runtime.abortSignal,
 
@@ -864,7 +877,12 @@ export class DefaultHarness implements HarnessInterface {
   async compact(
     events: SessionEvent[],
     runtime: HarnessRuntime,
-    ctx: { model: LanguageModel; systemPrompt: string; tools: Record<string, any> },
+    ctx: {
+      model: LanguageModel;
+      systemPrompt: string;
+      tools: Record<string, any>;
+      providerOptions?: SharedV3ProviderOptions;
+    },
   ): Promise<void> {
     const ctxWindow = resolveContextWindowTokens(ctx.model);
     const result = await this.compactionStrategy.compact(events, {
@@ -872,6 +890,7 @@ export class DefaultHarness implements HarnessInterface {
       contextWindowTokens: ctxWindow,
       systemPrompt: ctx.systemPrompt,
       tools: ctx.tools,
+      providerOptions: ctx.providerOptions,
       applyCacheStrategy: (sys, tls, msgs) => applyProviderCacheStrategy(ctx.model, sys, tls, msgs),
       runtime,
     });

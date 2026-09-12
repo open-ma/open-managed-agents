@@ -8,18 +8,21 @@
     "./recovery": "./src/recovery.ts",
     "./ports": "./src/ports.ts",
     "./adapter": "./src/adapter.ts",
-    "./machine": "./src/machine.ts"
+    "./machine": "./src/machine.ts",
+    "./execution-host": "./src/execution-host.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@open-managed-agents/execution-control": "workspace:*",
     "@open-managed-agents/event-log": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/session-runtime-contract": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
-    "ai": "^7.0.76",
+    "ai": "^7.0.95",
     "nanoid": "^5.1.0"
   },
   "devDependencies": {

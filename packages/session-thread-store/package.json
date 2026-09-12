@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@open-managed-agents/domain": "workspace:*"
+    "@open-managed-agents/domain": "workspace:*",
+    "@open-managed-agents/session-runtime-contract": "workspace:*"
   }
 }

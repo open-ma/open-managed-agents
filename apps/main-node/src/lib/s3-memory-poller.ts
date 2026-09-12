@@ -55,7 +55,7 @@ interface PollerS3Client {
 
 export interface S3MemoryPollerOptions {
   sql: SqlClient;
-  sqlDialect: "postgres" | "sqlite";
+  sqlDialect: "postgres" | "sqlite" | "mysql";
   memoryRepo: MemoryRepo;
   /** Per-process token used as the lease owner — survives only this process. */
   replicaId: string;

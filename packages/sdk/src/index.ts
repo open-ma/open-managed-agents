@@ -2,6 +2,25 @@ import Anthropic, {
   type ClientOptions as AnthropicClientOptions,
 } from "@anthropic-ai/sdk";
 import { OmaResources } from "./oma.js";
+import type {} from "./agents.js";
+
+export type {
+  OpenMaAgentAcp,
+  OpenMaAgentAcpParams,
+  OpenMaAgentExtension,
+  OpenMaAgentExtensionParams,
+  OpenMaAgentModelParams,
+  OpenMaAgent,
+  OpenMaAgentCreateParams,
+  OpenMaAgentUpdateParams,
+  OpenMaMcpServer,
+  OpenMaMcpServerParams,
+  OpenMaStdioMcpServer,
+  OpenMaStdioMcpServerParams,
+  OpenMaAgentRuntimeBindingParams,
+  OpenMaJsonValue,
+  OpenMaProviderOptions,
+} from "./agents.js";
 
 export {
   OmaModelsResource,

@@ -13,7 +13,7 @@
 
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type {
   BlobMetadata,
   BlobPrecondition,
@@ -68,6 +68,33 @@ export class LocalFsBlobStore implements BlobStore {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw err;
     }
+  }
+
+  async list(
+    prefix: string,
+    _cursor?: string,
+  ): Promise<{ keys: string[]; nextCursor: string | null }> {
+    const prefixPath = this.pathFor(prefix);
+    const keys: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      for (const entry of entries) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(path);
+        } else if (entry.isFile() && !entry.name.endsWith(".meta.json")) {
+          keys.push(relative(this.baseDir, path).split("\\").join("/"));
+        }
+      }
+    };
+    await visit(prefixPath);
+    return { keys: keys.sort(), nextCursor: null };
   }
 
   async put(

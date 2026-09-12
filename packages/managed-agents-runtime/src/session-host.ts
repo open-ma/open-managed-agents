@@ -56,9 +56,16 @@ export interface ManagedAgentsSessionPromptInput {
   text: string;
 }
 
+export interface ManagedAgentsSessionSteerInput {
+  sessionId: string;
+  eventId: string;
+  text: string;
+}
+
 interface ActiveSession {
   acp: AcpSession;
   turns: Map<string, AbortController>;
+  completedTurns: Set<string>;
   checkpoint?: ManagedAgentsSessionCheckpoint;
 }
 
@@ -185,9 +192,23 @@ export class ManagedAgentsSessionHost {
       });
       return;
     }
+    if (!session.supportsSteering) {
+      await session.dispose().catch(() => undefined);
+      this.#emit({
+        type: "session.error",
+        sessionId: input.sessionId,
+        message: "ACP agent does not support required session steering",
+      });
+      return;
+    }
     this.#sessions.set(input.sessionId, {
       acp: session,
       turns: new Map(),
+      completedTurns: new Set(
+        durableCheckpoint?.lastCompletedTurnId
+          ? [durableCheckpoint.lastCompletedTurnId]
+          : [],
+      ),
       ...(claimedCheckpoint ? { checkpoint: claimedCheckpoint } : {}),
     });
 
@@ -229,6 +250,15 @@ export class ManagedAgentsSessionHost {
       });
       return;
     }
+    if (session.completedTurns.has(input.turnId)) {
+      this.#emit({
+        type: "session.complete",
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      });
+      return;
+    }
+    if (session.turns.has(input.turnId)) return;
     if (!await this.#retainGenerationLease(input.sessionId, session)) return;
     const controller = new AbortController();
     session.turns.set(input.turnId, controller);
@@ -243,6 +273,12 @@ export class ManagedAgentsSessionHost {
           error?: unknown;
         } | null;
         if (sentinel?.type === "promptComplete") {
+          this.#emit({
+            type: "session.event",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            event,
+          });
           continue;
         }
         if (sentinel?.type === "promptError") {
@@ -258,18 +294,24 @@ export class ManagedAgentsSessionHost {
           event,
         });
       }
-      this.#emit(promptError
-        ? {
+      if (promptError) {
+        this.#emit({
             type: "session.error",
             sessionId: input.sessionId,
             turnId: input.turnId,
             message: promptError,
-          }
-        : {
-            type: "session.complete",
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-          });
+        });
+      } else {
+        if (!await this.#commitCompletedTurn(input.sessionId, session, input.turnId)) {
+          return;
+        }
+        session.completedTurns.add(input.turnId);
+        this.#emit({
+          type: "session.complete",
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+        });
+      }
     } catch (error) {
       this.#emit({
         type: "session.error",
@@ -279,6 +321,45 @@ export class ManagedAgentsSessionHost {
       });
     } finally {
       session.turns.delete(input.turnId);
+    }
+  }
+
+  async steer(input: ManagedAgentsSessionSteerInput): Promise<void> {
+    const session = this.#liveSession(input.sessionId);
+    if (!session) {
+      this.#emit({
+        type: "session.error",
+        sessionId: input.sessionId,
+        turnId: input.eventId,
+        message: "no such session",
+      });
+      return;
+    }
+    if (session.turns.size === 0) {
+      await this.prompt({
+        sessionId: input.sessionId,
+        turnId: input.eventId,
+        text: input.text,
+      });
+      return;
+    }
+    try {
+      const outcome = await session.acp.steer(input.text);
+      if (outcome === "failed") {
+        this.#emit({
+          type: "session.error",
+          sessionId: input.sessionId,
+          turnId: input.eventId,
+          message: "ACP agent rejected session steering",
+        });
+      }
+    } catch (error) {
+      this.#emit({
+        type: "session.error",
+        sessionId: input.sessionId,
+        turnId: input.eventId,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -411,6 +492,33 @@ export class ManagedAgentsSessionHost {
     }).catch(() => false);
     if (retained) {
       session.checkpoint = retainedCheckpoint;
+      return true;
+    }
+    if (this.#sessions.get(sessionId) === session) {
+      this.#sessions.delete(sessionId);
+    }
+    await session.acp.dispose().catch(() => undefined);
+    this.#emitLeaseLost(sessionId);
+    return false;
+  }
+
+  async #commitCompletedTurn(
+    sessionId: string,
+    session: ActiveSession,
+    turnId: string,
+  ): Promise<boolean> {
+    if (!session.checkpoint || !this.#checkpointStore) return true;
+    const completedCheckpoint: ManagedAgentsSessionCheckpoint = {
+      ...session.checkpoint,
+      lastCompletedTurnId: turnId,
+      updatedAt: this.#scheduler.now(),
+    };
+    const committed = await this.#checkpointStore.compareAndSet({
+      expectedGeneration: session.checkpoint.generation,
+      checkpoint: completedCheckpoint,
+    }).catch(() => false);
+    if (committed) {
+      session.checkpoint = completedCheckpoint;
       return true;
     }
     if (this.#sessions.get(sessionId) === session) {

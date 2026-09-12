@@ -6,7 +6,7 @@ import type {
   SessionUpdateParams,
 } from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
 import { z } from "zod";
-import { agentModelInputSchema } from "./agents";
+import { agentModelInputSchema, type OpenMaMcpServerBody } from "./agents";
 import {
   agentMcpServerInputSchema,
   agentSkillInputSchema,
@@ -19,9 +19,27 @@ import {
 } from "./session-event-inputs";
 import { sessionResourceResponseSchema } from "./session-resources";
 
-export type SessionCreateBody = Omit<SessionCreateParams, "betas">;
+type OfficialSessionCreateBody = Omit<SessionCreateParams, "betas">;
+type OfficialSessionAgent = Exclude<OfficialSessionCreateBody["agent"], string>;
+type OfficialSessionAgentOverride = Extract<
+  OfficialSessionAgent,
+  { type: "agent_with_overrides" }
+>;
+export type SessionCreateBody = Omit<OfficialSessionCreateBody, "agent"> & {
+  agent:
+    | string
+    | Exclude<OfficialSessionAgent, { type: "agent_with_overrides" }>
+    | (Omit<OfficialSessionAgentOverride, "mcp_servers"> & {
+        mcp_servers?: OpenMaMcpServerBody[];
+      });
+};
 export type SessionListQuery = Omit<SessionListParams, "betas">;
-export type SessionUpdateBody = Omit<SessionUpdateParams, "betas">;
+type OfficialSessionUpdateBody = Omit<SessionUpdateParams, "betas">;
+export type SessionUpdateBody = Omit<OfficialSessionUpdateBody, "agent"> & {
+  agent?: Omit<NonNullable<OfficialSessionUpdateBody["agent"]>, "mcp_servers"> & {
+    mcp_servers?: OpenMaMcpServerBody[];
+  };
+};
 type SessionAgentOverrides = Extract<
   Exclude<SessionCreateBody["agent"], string>,
   { type: "agent_with_overrides" }
@@ -196,7 +214,7 @@ export const sessionUsageResponseSchema = z
   })
   .strict();
 
-export const sessionResponseSchema: z.ZodType<BetaManagedAgentsSession> = z
+export const sessionResponseSchema = z
   .object({
     id: z.string().min(1),
     agent: sessionAgentResponseSchema,

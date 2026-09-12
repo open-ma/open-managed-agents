@@ -48,3 +48,15 @@ export interface SessionResourceStore {
     input: ReplaceCurrentSessionResources,
   ): Promise<ReplaceCurrentSessionResourcesResult>;
 }
+
+/** Read-side capability for materializing private repository resources.
+ * Implementations must scope every lookup to the owning workspace and
+ * Session; the plaintext is returned only to the runtime preparing that
+ * Session and is never added to the public Session aggregate. */
+export interface SessionResourceSecretSource {
+  findGithubToken(input: {
+    workspaceId: string;
+    sessionId: string;
+    resourceId: string;
+  }): Promise<string | null>;
+}

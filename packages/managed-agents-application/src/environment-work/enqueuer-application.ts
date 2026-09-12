@@ -6,12 +6,14 @@ import type {
   StopEnvironmentSessionWorkResult,
 } from "./enqueuer";
 import type { EnvironmentWorkSessionCredentialIssuerPort } from "./credential-issuer";
+import type { EnvironmentWorkWakeupPort } from "./wakeup";
 import type { EnvironmentWorkStore } from "@open-managed-agents/environment-work-store";
 
 export interface EnvironmentWorkEnqueuerServiceDependencies {
   workspaceId: string;
   store: EnvironmentWorkStore;
   credentials: EnvironmentWorkSessionCredentialIssuerPort;
+  wakeup: EnvironmentWorkWakeupPort;
   clock: { now(): Date };
   ids: { nextEnvironmentWorkId(): string };
 }
@@ -50,14 +52,16 @@ export class EnvironmentWorkEnqueuerService
         message: `Session ${input.session.id} does not belong to an active target environment`,
       };
     }
+    const workId = this.dependencies.ids.nextEnvironmentWorkId();
     const issued = await this.dependencies.credentials.issue({
       workspaceId: this.dependencies.workspaceId,
+      workId,
       environment: input.environment,
       session: input.session,
     });
     if (issued.type === "rejected") return issued;
     const work = {
-      id: this.dependencies.ids.nextEnvironmentWorkId(),
+      id: workId,
       acknowledgedAt: null,
       createdAt: this.dependencies.clock.now().toISOString(),
       data: { type: "session" as const, id: input.session.id },
@@ -78,6 +82,15 @@ export class EnvironmentWorkEnqueuerService
         heartbeatTtlSeconds: 90,
       },
     });
+    // Delivery is deliberately best-effort. The work row is already durable,
+    // and every Environment Worker must retain polling as its fallback.
+    await this.dependencies.wakeup.notifyRunStarted({
+      workspaceId: this.dependencies.workspaceId,
+      environmentId: input.environment.id,
+      sessionId: input.session.id,
+      workId,
+      occurredAt: work.createdAt,
+    }).catch(() => {});
     return { type: "queued", work: inserted.work };
   }
 

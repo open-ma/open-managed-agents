@@ -70,14 +70,59 @@ Detailed schemas in [Skills & Tools](/build/skills-and-tools/).
 
 ## Harness
 
-The agent loop itself — the code that decides what the model does next given the session events. openma ships a **DefaultHarness** built on the [`ai` SDK](https://sdk.vercel.ai/), but the harness interface is pluggable. You can register a custom harness that:
+The agent loop itself — the code that decides what the model does next given the session events. openma owns the loop and ships three placements behind the same harness interface:
+
+- **DefaultHarness / PiHarness** — run the loop in the OpenMA host.
+- **ACP sandbox harness** — spawn an ACP-compatible agent such as Claude Code or Codex inside the session sandbox while OpenMA keeps ownership of session lifecycle and canonical events.
+- **ACP proxy harness** — use a user-registered local runtime when the agent must run on a particular device.
+
+You can also register a custom harness that:
 
 - Drives a different model loop
 - Handles compaction differently (`shouldCompact`, `compact`)
 - Customizes the system prompt assembly (`deriveModelContext`)
 - Hooks into session lifecycle (`onSessionInit`, `run`)
 
-Two more harness modes are planned: **ContainerAgent** (run an external CLI like Claude Code or Codex inside the sandbox) and **DaemonAgent** (a local daemon connecting to the platform). See [Custom Integrations](/build/integrations/) for the shape.
+Compaction is a required harness capability, not provider behavior. `PiHarness`
+ships with a Pi-native policy that triggers from the model context window,
+summarizes through the tenant-scoped `pi-ai` model runtime, persists one
+`agent.thread_context_compacted` boundary, and performs one bounded
+compact-and-retry when Pi identifies a provider context-overflow response.
+The default `cc-style` policy uses an isolated summary-only payload with no
+tools and no image bytes. The explicit `summarize` policy instead preserves the
+active system/tools/history prefix and adds its instruction at the tail so
+automatic provider prefix caches remain eligible during the summary call.
+Replacing old history with the summary still creates one intentionally cold
+main-model boundary; later turns append to that stable compacted prefix and
+become cacheable again.
+The policy is replaceable without replacing the model/tool loop:
+
+```ts
+import { PiHarness } from '@open-managed-agents/agent/harness/pi-loop';
+import type { PiCompactionPolicy } from '@open-managed-agents/agent/harness/pi-compaction';
+
+const policy: PiCompactionPolicy = {
+  name: 'my-policy',
+  shouldCompact: (_events, { messages, contextWindowTokens }) =>
+    estimate(messages) > contextWindowTokens - 16_000,
+  async compact(events, context) {
+    // Use context.models/context.model, another model, or a deterministic reducer.
+    return summarize(events, context);
+  },
+};
+
+const harness = new PiHarness({ compaction: policy });
+```
+
+The capability cannot be disabled. A policy may choose not to compact a given
+turn, but it must remain present so overflow recovery and canonical history
+semantics do not depend on `pi-agent-core` internals.
+
+The sandbox placement is provider-neutral: every ACP process uses the
+`SandboxDuplexProcessPort`, whether the backing runtime is a Cloudflare
+Container, LiteBox, or E2B. Stateful ACP sessions retain one child
+across turns, renew the provider lease during a turn, and persist the native
+ACP session id in the workspace so a restored sandbox can resume it.
 
 ## Integration
 

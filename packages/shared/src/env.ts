@@ -153,6 +153,86 @@ export interface Env {
   // and routed through here for vault-credential injection by hostname
   // match. Same "credentials only ever live in main" property.
   MAIN_MCP?: {
+    resolveManagedSessionInputs(opts: {
+      tenantId: string;
+      sessionId: string;
+    }): Promise<
+      | {
+          type: "found";
+          session: {
+            id: string;
+            environmentId: string;
+            metadata: Readonly<Record<string, string>>;
+            resources: readonly (Readonly<Record<string, unknown>> & { type: string })[];
+          };
+        }
+      | { type: "not_found" }
+    >;
+    downloadManagedSessionFile(opts: {
+      tenantId: string;
+      sessionId: string;
+      fileId: string;
+    }): Promise<
+      | {
+          type: "found";
+          content: Uint8Array;
+          filename?: string;
+          mimeType: string;
+        }
+      | { type: "not_found" }
+    >;
+    materializeManagedMemorySnapshot(opts: {
+      tenantId: string;
+      sessionId: string;
+      memoryStoreId: string;
+      access: "read_only" | "read_write";
+      runtimeGeneration?: string;
+    }): Promise<
+      | { type: "found"; mountStoreId: string }
+      | { type: "not_found" }
+    >;
+    synchronizeManagedMemorySnapshots(opts: {
+      tenantId: string;
+      sessionId: string;
+      runtimeGeneration: string;
+      executionFence: {
+        executionId: string;
+        workspaceId: string;
+        sessionId: string;
+        attemptId: string;
+        ownerId: string;
+        generation: number;
+        expiresAt: string;
+      };
+    }): Promise<
+      | {
+          type: "synchronized";
+          created: number;
+          updated: number;
+          deleted: number;
+          conflicts: Array<{
+            memoryStoreId: string;
+            path: string;
+            reason: "changed_both";
+          }>;
+          recoveredWipes: string[];
+        }
+      | { type: "not_found" }
+      | { type: "fence_lost" }
+    >;
+    resolveManagedSkillVersion?(opts: {
+      tenantId: string;
+      skillId: string;
+      requestedVersion: string;
+    }): Promise<
+      | {
+          type: "found";
+          version: string;
+          name: string;
+          archive: Uint8Array;
+        }
+      | { type: "not_found" }
+    >;
     managedSessionEventProduced(opts: {
       workspaceId: string;
       sessionId: string;
@@ -190,6 +270,15 @@ export interface Env {
       tenantId: string;
       sessionId: string;
       hostname: string;
+      /** Present for Managed Runtime traffic. Legacy SessionDO callers may
+       * omit it; enforced provider adapters always supply the full claim. */
+      runtimeFence?: {
+        environmentId: string;
+        workId: string;
+        ownerId: string;
+        generation: number;
+        token: string;
+      };
     }): Promise<{ type: "bearer"; token: string } | null>;
     /**
      * Per-repo GitHub credential lookup for the network-layer proxy
@@ -203,6 +292,13 @@ export interface Env {
       sessionId: string;
       hostname: string;
       pathname: string;
+      runtimeFence?: {
+        environmentId: string;
+        workId: string;
+        ownerId: string;
+        generation: number;
+        token: string;
+      };
     }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null>;
     /**
      * Transparent HTTP proxy for the cloud agent's MCP traffic. Agent
@@ -223,6 +319,11 @@ export interface Env {
   INTEGRATIONS_PUBLIC_URL?: string;
   // Used by integrations subsystem to sign tokens at rest. Gateway's value.
   PLATFORM_ROOT_SECRET?: string;
+  /** Optional organization-level Managed Agents webhook wake-up endpoint.
+   * Polling remains authoritative when unset or delivery fails. */
+  OMA_MANAGED_AGENTS_WEBHOOK_URL?: string;
+  OMA_MANAGED_AGENTS_WEBHOOK_SIGNING_KEY?: string;
+  OMA_MANAGED_AGENTS_ORGANIZATION_ID?: string;
   // Killswitch for per-tenant D1 routing. Unset / "true" / anything else =
   // routing enabled (the default — uses tenant_shard meta table). Set to
   // "false" or "0" to roll back to the shared-MAIN_DB provider without

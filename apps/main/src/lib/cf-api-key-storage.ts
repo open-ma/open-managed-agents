@@ -17,6 +17,7 @@ interface IndexEntry {
   hash: string;
   created_at: string;
   source?: string;
+  credential?: ApiKeyRecord["credential"];
 }
 
 function indexKey(tenantId: string): string {
@@ -35,6 +36,7 @@ export function cfApiKeyStorage(kv: KvStore): ApiKeyStorage {
         hash,
         created_at: record.created_at,
         ...(record.source ? { source: record.source } : {}),
+        ...(record.credential ? { credential: record.credential } : {}),
       });
       await kv.put(indexKey(record.tenant_id), JSON.stringify(idx));
     },

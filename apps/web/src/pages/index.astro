@@ -21,10 +21,10 @@ const schemas = [softwareApplicationSchema()];
 ---
 
 <Base
-  title="OpenMA: Open-Source Claude Managed Agents Alternative"
-  description="Run OpenMA on Cloudflare or Docker: an Apache-2.0 Claude Managed Agents alternative with durable sessions, MCP tools, vaults, memory, and BYOK."
+  title="OpenMA: Claude Managed Agents & OpenAI Agents API"
+  description="Self-host agents with the Claude and OpenAI SDKs. OpenMA handles sessions, tools and recovery. OpenAI Agents API is available on Node."
   canonical="/"
-  keywords="claude managed agents, claude managed agents alternative, claude tag alternative, claude tag open source, open source claude tag, self-hosted claude tag, claude tag self hosted, open source claude managed agents, claude agent platform, self host claude code, claude code skills, claude agent sdk, mcp server host, ai agent cloudflare workers, byok ai agent"
+  keywords="openai agents api, openai agents api alternative, self-hosted openai agents, claude managed agents, claude managed agents alternative, open-source agent platform, subagents, acp, mcp, byok, claude tag alternative"
   schemas={schemas}
 >
   <!-- Hero -->
@@ -34,20 +34,22 @@ const schemas = [softwareApplicationSchema()];
         Apache 2.0 · Cloudflare-native · Self-hostable
       </p>
       <h1 class="font-display text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight">
-        The open-source Claude Managed Agents alternative
+        Run Claude and OpenAI agents on your own server
         <span class="block mt-4 text-xl md:text-2xl text-[var(--color-fg-muted)] font-medium">
-          Run Claude agents yourself — on Cloudflare or with <code class="font-mono text-base md:text-xl">docker compose up</code>
+          Use the SDKs you know. Keep control of where your agents run.
         </span>
       </h1>
       <p class="mt-6 text-base md:text-lg text-[var(--color-fg-muted)] max-w-2xl mx-auto leading-relaxed">
-        A wire-compatible, self-hostable agent platform: durable sessions,
-        sandboxed code execution, vault-backed credentials, MCP server hosting,
-        and Claude Code skills — served from Cloudflare Workers + Durable
-        Objects, or a Docker container on your own box. Same API surface as
-        the proprietary version, with the source code and the runtime under
-        your control.
+        OpenMA handles sessions, tools and crash recovery. Connect your own
+        model keys, give agents access to your files and services, and deploy
+        on your infrastructure. Open source, under the Apache 2.0 license.
       </p>
       <div class="mt-8 flex items-center justify-center gap-3 flex-wrap">
+        <a
+          href="/deploy/"
+          class="px-5 py-3 rounded-md bg-[var(--color-brand)] text-[var(--color-brand-fg)] font-medium"
+          >Deploy your own</a
+        >
         <a
           href="https://github.com/openma-ai/open-managed-agents"
           target="_blank" rel="noopener noreferrer"
@@ -64,6 +66,9 @@ const schemas = [softwareApplicationSchema()];
         Self-host: <code class="font-mono">docker compose up</code>. Hosted: free
         $1 trial credit, BYOK for LLM spend.
       </p>
+      <p class="mt-3 text-sm text-[var(--color-fg-muted)]">
+        <a href="#openai-agents-api">Connect your SDK</a>
+      </p>
     </div>
   </section>
 
@@ -71,16 +76,14 @@ const schemas = [softwareApplicationSchema()];
   <section class="max-w-5xl mx-auto px-4 py-16" data-reveal>
     <h2 class="font-display text-3xl font-bold mb-3 text-center">Why Open Managed Agents</h2>
     <p class="text-center text-[var(--color-fg-muted)] max-w-2xl mx-auto mb-12">
-      The same shape of platform you'd get from a closed vendor — sessions,
-      sandboxes, tool dispatch, crash recovery, billing — but every layer is
-      inspectable, swappable, and yours to fork.
+      Give your agents a place to work, remember their conversations, and
+      recover when a process stops. You choose the models and where your data lives.
     </p>
     <div class="grid md:grid-cols-3 gap-8">
-      <FeatureCard title="Drop-in compatible">
-        The HTTP API mirrors the Claude Managed Agents API — same
-        <code class="font-mono text-xs">/v1/agents</code>,
-        <code class="font-mono text-xs">/v1/sessions</code>, same event-stream
-        shape. Migrate by swapping the base URL.
+      <FeatureCard title="Claude and OpenAI SDKs">
+        Keep using the Claude or OpenAI SDK in your application. Point it at
+        your OpenMA server to create agents, start conversations and get results.
+        OpenAI Agents API is currently available on Node.
       </FeatureCard>
       <FeatureCard title="Self-host on Cloudflare">
         Workers + Durable Objects + Containers + R2. One <code class="font-mono text-xs">wrangler deploy</code>,
@@ -100,21 +103,21 @@ const schemas = [softwareApplicationSchema()];
     <div class="max-w-5xl mx-auto px-4 py-16">
       <h2 class="font-display text-3xl font-bold mb-3 text-center">How it works</h2>
       <p class="text-center text-[var(--color-fg-muted)] max-w-2xl mx-auto mb-10">
-        A meta-harness — the platform that runs your agent loop. You write the
-        brain (read events, build context, call the model). The platform manages
-        the infrastructure (sandbox, event log, tools, crash recovery).
+        Choose a model and tell your agent what to do. OpenMA gives it tools
+        and a workspace, saves its progress, and lets you continue the conversation.
+        Use the built-in agent loop or bring your own.
       </p>
 
       <div class="grid md:grid-cols-2 gap-8 items-start">
         <pre class="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-4 text-xs leading-relaxed overflow-x-auto"><code>┌────────────────────────────────────┐
-│  Harness — your code               │
-│  reads events, calls the model     │
+│  Your agent                       │
+│  instructions, model, tools       │
 ├────────────────────────────────────┤
-│  Meta-harness (SessionDO)          │
-│  sandbox, event log, tools, vaults │
+│  OpenMA                           │
+│  sessions, files, recovery        │
 ├────────────────────────────────────┤
-│  Cloudflare                         │
-│  Workers + DO + Containers + R2    │
+│  Your infrastructure              │
+│  Docker or Cloudflare             │
 └────────────────────────────────────┘</code></pre>
 
         <div>
@@ -134,64 +137,61 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
   </section>
 
   <!-- API compatibility -->
-  <section class="max-w-5xl mx-auto px-4 py-16" data-reveal>
-    <h2 class="font-display text-3xl font-bold mb-4">Drop-in compatible with the Claude Managed Agents API</h2>
+  <section id="openai-agents-api" class="max-w-5xl mx-auto px-4 py-16" data-reveal>
+    <h2 class="font-display text-3xl font-bold mb-4">Connect the SDK you already use</h2>
     <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
-      We track the public surface of the Claude Managed Agents API one-to-one.
-      Resources, request shapes, response shapes, the SSE event stream — all
-      the same. If your client code already speaks Managed Agents, point it at
-      <code class="font-mono text-sm">https://openma.dev</code> (hosted) or
-      <code class="font-mono text-sm">http://localhost:8787</code> (self-host)
-      and it works.
+      OpenMA supports Claude Managed Agents and OpenAI Agents API. Start with
+      <a href="/deploy/">a deployment</a>, add your model key, and connect your
+      application. Here's an OpenAI SDK example for a local Node server:
     </p>
     <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
-      What you get on top: every resource definition, every state-machine
-      transition, every retry rule is in source code you can read. No black
-      box. When something behaves unexpectedly, you can <em>see</em> why and
-      fix it — and your fix can ship as a PR.
+      Use the API key and model you configured in OpenMA:
+    </p>
+    <pre class="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-lg p-4 text-xs leading-relaxed overflow-x-auto mb-4"><code>{`import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENMA_API_KEY,
+  baseURL: "http://localhost:8787/openai/v1",
+});
+
+const session = await client.beta.agents.sessions.create({
+  agent: { model: "your-configured-model" },
+  environment: { type: "none" },
+  input: "Hello",
+});`}</code></pre>
+    <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
+      Let an agent hand off subtasks to other agents that share its files.
+      Each child keeps its own conversation, and you can follow up or stop it.
+      Children cannot create further children.
+    </p>
+    <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
+      OpenAI Agents API currently requires a Node deployment. Advanced
+      environment and plugin settings are not yet supported.
+      <a href="https://github.com/openma-ai/open-managed-agents/blob/main/docs/openai-agents-compatibility-status.md">Check supported features before migrating</a>.
     </p>
     <p class="text-[var(--color-fg-muted)] leading-relaxed">
-      Where the open implementation goes further: the harness layer is
-      explicit and replaceable. The hosted Claude Managed Agents version owns
-      the agent loop; here you can write your own. We ship a sensible default
-      harness, and you swap in custom context engineering, caching, compaction,
-      or tool-delivery logic without touching the platform. Read more in
-      <a href="/blog/claude-managed-agents-vs-open-managed-agents/">the technical comparison</a>.
+      <a href="https://github.com/openma-ai/open-managed-agents#openai-agents-api-quickstart-node">Read the OpenAI SDK setup guide</a>
+      or <a href="https://docs.openma.dev/quickstart/">get started with Claude Managed Agents</a>.
     </p>
   </section>
 
   <!-- Cloudflare -->
   <section class="border-t border-[var(--color-border)] bg-[var(--color-bg-surface)]" data-reveal>
     <div class="max-w-5xl mx-auto px-4 py-16">
-      <h2 class="font-display text-3xl font-bold mb-4">Built on Cloudflare Workers + Durable Objects</h2>
+      <h2 class="font-display text-3xl font-bold mb-4">Choose where your agents run</h2>
       <p class="text-[var(--color-fg-muted)] leading-relaxed mb-6">
-        Cloudflare's primitives map almost too cleanly onto an agent platform.
-        Each session needs strong consistency and a long-lived event log:
-        Durable Objects with embedded SQLite. Each agent step needs a real
-        Linux sandbox with a writable filesystem: Cloudflare Containers. Tool
-        outputs and workspace snapshots need durable blob storage: R2.
-        Configuration and per-tenant state: KV and D1. One <code class="font-mono text-sm">wrangler deploy</code>
-        and the whole platform is up — there are no servers to patch, no Kafka
-        to operate, no Redis to scale.
+        Run OpenMA on Cloudflare if you want managed infrastructure, or use
+        Docker on your own server. Either way, you control your model keys,
+        data and agent configuration.
       </p>
       <p class="text-[var(--color-fg-muted)] leading-relaxed mb-6">
-        The architecture is intentionally Cloudflare-default, not
-        Cloudflare-only. <code class="font-mono text-sm">packages/services</code> is a
-        backend abstraction layer: every store (agents, sessions, vaults,
-        memory) has a <code class="font-mono text-sm">cf</code> adapter (D1) and a
-        <code class="font-mono text-sm">pg</code> adapter (Postgres). Choice is per-store
-        via env var, so you can move one store at a time. The same pattern
-        applies to sandboxes — LocalSubprocess, LiteBox, E2B, Daytona, BoxRun
-        all swap in for the Cloudflare Sandbox without touching harness or
-        routes.
+        Start locally with SQLite, or connect Postgres and S3 for your
+        deployment. Choose a sandbox provider for code execution, including
+        LiteBox, E2B, Daytona or BoxRun.
       </p>
       <p class="text-[var(--color-fg-muted)] leading-relaxed">
-        For self-hosters who can't run Cloudflare at all (data residency,
-        existing AWS investment, compliance), the Node + Postgres + S3
-        deployment is a first-class target. <code class="font-mono text-sm">docker compose up</code>
-        is the canonical local dev path, and the same Docker image runs in
-        production. Same API surface, same Console, same event-log semantics.
-        Walk through the deep dive in
+        Both deployments support Claude Managed Agents. Choose the Node
+        deployment for OpenAI Agents API support. Follow
         <a href="/blog/self-host-agent-platform-cloudflare-workers/">the self-host guide</a>.
       </p>
     </div>
@@ -293,7 +293,7 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
           </tr>
           <tr>
             <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Sandbox runtime</th>
-            <td class="px-4 py-3 border-b border-[var(--color-border)]">Cloudflare Containers, LocalSubprocess, E2B, Daytona, BoxRun</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Cloudflare Containers, LiteBox, E2B, Daytona, BoxRun</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic-managed sandbox</td>
           </tr>
           <tr>

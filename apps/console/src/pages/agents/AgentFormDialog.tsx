@@ -10,18 +10,13 @@ import type {
   AgentUpdateParams,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
 
-import { useApi } from "../../lib/api";
 import { useManagedApi } from "../../lib/useManagedApi";
 import { Button } from "@/components/ui/button";
-import { Select, SelectGroup, SelectGroupLabel, SelectOption } from "../../components/Select";
+import { Select, SelectOption } from "../../components/Select";
 import { Combobox } from "../../components/Combobox";
 import { McpServerPickerModal } from "../../components/McpServerPickerModal";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../../data/templates";
 import type { ModelCard } from "@open-managed-agents/api-types";
-import {
-  KNOWN_ACP_AGENTS,
-  resolveKnownAgent,
-} from "@open-managed-agents/acp-runtime/known-agents";
 import type { AgentRecord as Agent } from "../../types/agent";
 import { useI18n } from "../../i18n";
 import {
@@ -29,8 +24,10 @@ import {
   agentToForm,
   agentToPreservedConfig,
   configToForm,
+  materializeAgentUpdate,
   mergeFormIntoConfig,
-  requiresOmaAgentEndpoint,
+  parseAgentConfigText,
+  prepareCodePayload,
   type FormState,
   type McpEntry,
   type SkillEntry,
@@ -81,16 +78,6 @@ interface AgentFormDialogProps {
   allAgents: Agent[];
   customSkills: Array<{ id: string; name: string; description: string }>;
   modelCards: ModelCard[];
-  runtimes: Array<{
-    id: string;
-    hostname: string;
-    status: string;
-    agents: Array<{ id: string }>;
-    local_skills?: Record<
-      string,
-      Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>
-    >;
-  }>;
 }
 
 /**
@@ -114,9 +101,7 @@ export function AgentFormDialog({
   allAgents,
   customSkills,
   modelCards,
-  runtimes,
 }: AgentFormDialogProps) {
-  const { api } = useApi();
   const managedApi = useManagedApi();
   const nav = useNavigate();
   const { t } = useI18n();
@@ -235,20 +220,6 @@ export function AgentFormDialog({
   }, [open]);
 
   const persistAgent = async (payload: Record<string, unknown>): Promise<Agent> => {
-    if (requiresOmaAgentEndpoint(payload)) {
-      const path = isEdit && editingAgent
-        ? `/v1/oma/agents/${editingAgent.id}`
-        : "/v1/oma/agents";
-      return api<Agent>(path, {
-        method: "POST",
-        body: JSON.stringify(
-          isEdit && editingAgent
-            ? { ...payload, version: editingAgent.version }
-            : payload,
-        ),
-      });
-    }
-
     if (isEdit && editingAgent) {
       const updated = await managedApi.agents.update(editingAgent.id, {
         ...payload,
@@ -288,12 +259,29 @@ export function AgentFormDialog({
   };
 
   const addMcp = () =>
-    setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "url", url: "" }] });
+    setForm({
+      ...form,
+      mcpServers: [...form.mcpServers, {
+        name: "",
+        type: "url",
+        url: "",
+        command: "",
+        argsJson: "[]",
+        envJson: "{}",
+      }],
+    });
   const addMcpFromRegistry = (entry: { id: string; name: string; url: string }) => {
     if (form.mcpServers.some((m) => m.url === entry.url)) return;
     setForm({
       ...form,
-      mcpServers: [...form.mcpServers, { name: entry.id, type: "url", url: entry.url }],
+      mcpServers: [...form.mcpServers, {
+        name: entry.id,
+        type: "url",
+        url: entry.url,
+        command: "",
+        argsJson: "[]",
+        envJson: "{}",
+      }],
     });
   };
   const updateMcp = (i: number, field: keyof McpEntry, val: string) => {
@@ -323,7 +311,7 @@ export function AgentFormDialog({
     if (form.callableAgents.find((c) => c.id === agentId)) return;
     setForm({
       ...form,
-      callableAgents: [...form.callableAgents, { type: "agent", id: agentId, version: 1 }],
+      callableAgents: [...form.callableAgents, { type: "agent", id: agentId }],
     });
   };
   const removeCallable = (i: number) =>
@@ -340,7 +328,13 @@ export function AgentFormDialog({
         model: tmpl.model,
         system: tmpl.system,
         description: tmpl.description,
-        mcpServers: tmpl.mcpServers.map((m) => ({ ...m })),
+        mcpServers: tmpl.mcpServers.map((m) => ({
+          ...m,
+          type: "url" as const,
+          command: "",
+          argsJson: "[]",
+          envJson: "{}",
+        })),
         skills: tmpl.skills.map((s) => ({ ...s } as SkillEntry)),
       });
       setPreservedConfig(null);
@@ -359,38 +353,37 @@ export function AgentFormDialog({
     if (createMode === "form") {
       // form → code: serialize merged form + preserved unsupported fields
       const config = formToConfig();
-      setPreservedConfig(config);
       setCodeValue(
         mode === "yaml" ? yaml.dump(config, { lineWidth: -1 }) : JSON.stringify(config, null, 2),
       );
     } else if (mode === "form") {
       // code → form: parse into preserved baseline, then extract form fields
       try {
-        const parsed =
-          createMode === "yaml"
-            ? (yaml.load(codeValue) as Record<string, unknown>)
-            : (JSON.parse(codeValue) as Record<string, unknown>);
-        setPreservedConfig(parsed);
-        setForm(configToForm(parsed));
-      } catch {
-        /* keep current form if parse fails */
+        const parsed = parseAgentConfigText(codeValue, createMode);
+        const config = isEdit
+          ? materializeAgentUpdate(preservedConfig ?? {}, parsed)
+          : parsed;
+        setPreservedConfig(config);
+        setForm(configToForm(config));
+      } catch (error) {
+        setCreateError(error instanceof Error ? error.message : "Invalid config");
+        return;
       }
     } else {
       // yaml ↔ json: convert between formats
       try {
-        const parsed = createMode === "yaml" ? yaml.load(codeValue) : JSON.parse(codeValue);
-        if (parsed && typeof parsed === "object") {
-          setPreservedConfig(parsed as Record<string, unknown>);
-        }
+        const parsed = parseAgentConfigText(codeValue, createMode);
         setCodeValue(
           mode === "yaml"
             ? yaml.dump(parsed, { lineWidth: -1 })
             : JSON.stringify(parsed, null, 2),
         );
-      } catch {
-        /* keep current value if parse fails */
+      } catch (error) {
+        setCreateError(error instanceof Error ? error.message : "Invalid config");
+        return;
       }
     }
+    setCreateError("");
     setCreateMode(mode);
   };
 
@@ -399,16 +392,13 @@ export function AgentFormDialog({
     setCreateError("");
     setSaving(true);
     try {
-      const parsed =
-        createMode === "yaml"
-          ? (yaml.load(codeValue) as Record<string, unknown>)
-          : JSON.parse(codeValue);
-      if (!parsed.name) {
-        setCreateError("name is required");
-        setSaving(false);
-        return;
-      }
-      if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
+      const parsed = prepareCodePayload(
+        parseAgentConfigText(
+          codeValue,
+          createMode === "yaml" ? "yaml" : "json",
+        ),
+        { forUpdate: isEdit },
+      );
       if (isEdit && editingAgent) {
         const updated = await persistAgent(parsed);
         closeCreate();
@@ -670,7 +660,6 @@ export function AgentFormDialog({
                     createError={createError}
                     inputCls={inputCls}
                     modelCards={modelCards}
-                    runtimes={runtimes}
                     selectedCardId={selectedCardId}
                   />
                 )}
@@ -763,7 +752,9 @@ export function AgentFormDialog({
       <McpServerPickerModal
         open={showMcpPicker}
         onClose={() => setShowMcpPicker(false)}
-        alreadyAddedUrls={form.mcpServers.map((m) => m.url)}
+        alreadyAddedUrls={form.mcpServers.flatMap((m) =>
+          m.type === "url" && m.url ? [m.url] : []
+        )}
         onPick={addMcpFromRegistry}
       />
     </>
@@ -778,7 +769,6 @@ interface BasicTabProps {
   createError: string;
   inputCls: string;
   modelCards: ModelCard[];
-  runtimes: AgentFormDialogProps["runtimes"];
   selectedCardId: string;
 }
 
@@ -788,7 +778,6 @@ function BasicTab({
   createError,
   inputCls,
   modelCards,
-  runtimes,
   selectedCardId,
 }: BasicTabProps) {
   return (
@@ -811,8 +800,7 @@ function BasicTab({
         />
       </div>
       {/* Model picker — see comments at the original call site. */}
-      {!form.runtimeId &&
-        (modelCards.length === 0 ? (
+      {modelCards.length === 0 ? (
           <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
             No model cards configured. Cloud agents need at least one card to provide LLM
             credentials.{" "}
@@ -854,13 +842,76 @@ function BasicTab({
               }
             />
           </div>
-        ))}
-      {form.runtimeId && (
-        <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-          Model is determined by the ACP child on the runtime ({form.acpAgentId || "—"}) — it
-          uses its own LLM credentials.
-        </p>
-      )}
+        )}
+      <div className="grid grid-cols-[minmax(0,1fr)_9rem] gap-3">
+        <div>
+          <Label className="text-sm text-fg-muted block mb-1">
+            Auxiliary model
+          </Label>
+          <Combobox<ModelCard>
+            value={
+              modelCards.find((card) => card.model_id === form.auxiliaryModel)?.id ?? ""
+            }
+            onValueChange={(value, item) =>
+              setForm({
+                ...form,
+                auxiliaryModel: item?.model_id ?? (value ? form.auxiliaryModel : ""),
+              })
+            }
+            endpoint="/v1/oma/model_cards"
+            searchParam="q"
+            pagination="oma"
+            getValue={(card) => card.id}
+            getLabel={(card) => card.model_id}
+            getTextLabel={(card) => card.model_id}
+            placeholder="None"
+          />
+        </div>
+        <div>
+          <Label className="text-sm text-fg-muted block mb-1">Speed</Label>
+          <Select
+            value={form.auxiliaryModelSpeed || "default"}
+            disabled={!form.auxiliaryModel}
+            onValueChange={(value) =>
+              setForm({
+                ...form,
+                auxiliaryModelSpeed:
+                  value === "standard" || value === "fast" ? value : "",
+              })
+            }
+            className={inputCls}
+          >
+            <SelectOption value="default">default</SelectOption>
+            <SelectOption value="standard">standard</SelectOption>
+            <SelectOption value="fast">fast</SelectOption>
+          </Select>
+        </div>
+      </div>
+      <div>
+        <Label
+          htmlFor="agent-appendable-prompts"
+          className="text-sm text-fg-muted block mb-1"
+        >
+          Appendable prompt IDs
+        </Label>
+        <Textarea
+          id="agent-appendable-prompts"
+          value={form.appendablePrompts.join("\n")}
+          onChange={(event) =>
+            setForm({
+              ...form,
+              appendablePrompts: event.target.value
+                .split("\n")
+                .map((value) => value.trim())
+                .filter(Boolean),
+            })
+          }
+          rows={3}
+          className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+          placeholder="prompt_review\nprompt_security"
+        />
+        <p className="mt-1 text-xs text-fg-subtle">One prompt ID per line.</p>
+      </div>
       <div>
         <Label htmlFor="agent-description" className="text-sm text-fg-muted block mb-1">
           Description
@@ -872,6 +923,23 @@ function BasicTab({
           className={inputCls}
           placeholder="A coding assistant that writes clean code..."
         />
+      </div>
+      <div>
+        <Label htmlFor="agent-metadata" className="text-sm text-fg-muted block mb-1">
+          Metadata (JSON)
+        </Label>
+        <Textarea
+          id="agent-metadata"
+          value={form.metadataJson}
+          onChange={(event) => setForm({ ...form, metadataJson: event.target.value })}
+          rows={4}
+          className={`${inputCls} resize-y font-mono text-xs leading-relaxed`}
+          spellCheck={false}
+          placeholder='{"team":"platform"}'
+        />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Up to 16 string pairs; keys up to 64 characters and values up to 512.
+        </p>
       </div>
       <div>
         <Label htmlFor="agent-system" className="text-sm text-fg-muted block mb-1">
@@ -886,195 +954,6 @@ function BasicTab({
           placeholder="You are a helpful assistant..."
         />
       </div>
-      {/* Local Runtime — bind agent's loop to a user-registered machine
-          instead of OMA's cloud SessionDO. The "no runtime" option is the
-          default cloud agent. */}
-      <div>
-        <Label className="text-sm text-fg-muted block mb-1">
-          Local Runtime
-          <span className="ml-1 text-xs text-fg-subtle">(optional)</span>
-        </Label>
-        {runtimes.length === 0 ? (
-          <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-            No runtimes registered.{" "}
-            <a href="/runtimes" className="underline hover:text-fg-muted">
-              Connect a machine
-            </a>{" "}
-            to delegate this agent's loop to your own Claude Code (or other ACP) child.
-          </p>
-        ) : (
-          <>
-            <Select
-              value={form.runtimeId || "__cloud__"}
-              onValueChange={(v) => {
-                const rid = v === "__cloud__" ? "" : v;
-                // Auto-pick the first detected ACP agent on the chosen runtime —
-                // user doesn't have to know what strings the daemon emits.
-                const first = runtimes.find((r) => r.id === rid)?.agents?.[0]?.id;
-                setForm({
-                  ...form,
-                  runtimeId: rid,
-                  acpAgentId: rid && first ? first : form.acpAgentId,
-                });
-              }}
-              placeholder="— Cloud (run on OMA) —"
-            >
-              <SelectOption value="__cloud__">— Cloud (run on OMA) —</SelectOption>
-              {runtimes.map((r) => (
-                <SelectOption key={r.id} value={r.id} disabled={r.status !== "online"}>
-                  {r.hostname} ({r.status}
-                  {r.status === "online" && r.agents?.length
-                    ? ` · ${r.agents.length} agents`
-                    : ""}
-                  )
-                </SelectOption>
-              ))}
-            </Select>
-            {form.runtimeId && (
-              <AcpAgentPicker form={form} setForm={setForm} runtimes={runtimes} />
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AcpAgentPicker({
-  form,
-  setForm,
-  runtimes,
-}: {
-  form: FormState;
-  setForm: FormSetter;
-  runtimes: AgentFormDialogProps["runtimes"];
-}) {
-  const detectedAgents = runtimes.find((r) => r.id === form.runtimeId)?.agents ?? [];
-  // OMA promotes 4 agents as "first class" in the UI (overlay's
-  // `featured` flag). Featured-detected render on top so the common
-  // case is one click. Anything not detected by the daemon is
-  // intentionally hidden — users must install via cli first.
-  const featuredIds = new Set(KNOWN_ACP_AGENTS.filter((e) => e.featured).map((e) => e.id));
-  const featuredDetected = detectedAgents.filter((a) => featuredIds.has(a.id));
-  const otherDetected = detectedAgents.filter((a) => !featuredIds.has(a.id));
-
-  // Canonicalize first: form.acpAgentId may be a legacy alias on stale
-  // rows ("claude-code-acp"), but the daemon emits local_skills under the
-  // canonical key ("claude-agent-acp"). Without resolving here the
-  // blocklist would silently show empty even though skills exist.
-  const canonicalId = resolveKnownAgent(form.acpAgentId)?.id ?? form.acpAgentId;
-  const localSkills =
-    runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[canonicalId] ?? [];
-
-  return (
-    <div className="mt-2">
-      <Label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</Label>
-      <Select
-        value={form.acpAgentId}
-        onValueChange={(v) =>
-          setForm({ ...form, acpAgentId: v, localSkillBlocklist: [] })
-        }
-      >
-        {featuredDetected.length > 0 && (
-          <SelectGroup>
-            <SelectGroupLabel>★ Featured</SelectGroupLabel>
-            {featuredDetected.map((a) => (
-              <SelectOption key={a.id} value={a.id}>
-                {a.id}
-              </SelectOption>
-            ))}
-          </SelectGroup>
-        )}
-        {otherDetected.length > 0 && (
-          <SelectGroup>
-            <SelectGroupLabel>Other detected on this runtime</SelectGroupLabel>
-            {otherDetected.map((a) => (
-              <SelectOption key={a.id} value={a.id}>
-                {a.id}
-              </SelectOption>
-            ))}
-          </SelectGroup>
-        )}
-      </Select>
-      <p className="text-xs text-fg-subtle mt-1">
-        Each turn spawns this ACP child on the runtime. Model + skills come from the
-        daemon-fetched bundle.
-      </p>
-
-      {/* Local-skill blocklist — multi-select fed by what the daemon
-          reported in hello.local_skills[acpAgentId]. */}
-      {localSkills.length > 0 && (
-        <LocalSkillBlocklist form={form} setForm={setForm} localSkills={localSkills} />
-      )}
-    </div>
-  );
-}
-
-function LocalSkillBlocklist({
-  form,
-  setForm,
-  localSkills,
-}: {
-  form: FormState;
-  setForm: FormSetter;
-  localSkills: Array<{
-    id: string;
-    name?: string;
-    description?: string;
-    source?: string;
-    source_label?: string;
-  }>;
-}) {
-  const allowed = new Set(localSkills.map((s) => s.id));
-  for (const id of form.localSkillBlocklist) allowed.delete(id);
-  return (
-    <div className="mt-3 border border-border rounded-md p-2.5 bg-bg-surface">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs text-fg-muted">
-          Local skills ({allowed.size}/{localSkills.length} visible)
-        </span>
-        <Button variant="ghost"
-          type="button"
-          onClick={() => setForm({ ...form, localSkillBlocklist: [] })}
-          className="inline-flex items-center min-h-11 sm:min-h-0 px-1 text-xs text-fg-subtle hover:text-fg underline"
-        >
-          reset
-        </Button>
-      </div>
-      <div className="space-y-0.5 max-h-40 overflow-y-auto">
-        {localSkills.map((s) => {
-          const blocked = form.localSkillBlocklist.includes(s.id);
-          return (
-            <Label
-              key={s.id}
-              className="flex items-start gap-2 text-xs cursor-pointer hover:bg-bg rounded px-1.5 py-0.5"
-            >
-              <Checkbox
-                checked={!blocked}
-                onCheckedChange={(checked) => {
-                  const next = new Set(form.localSkillBlocklist);
-                  if (checked === true) next.delete(s.id);
-                  else next.add(s.id);
-                  setForm({ ...form, localSkillBlocklist: [...next] });
-                }}
-                className="mt-0.5"
-              />
-              <span className="font-mono text-fg flex-shrink-0">{s.id}</span>
-              <span className="text-fg-subtle">
-                ({s.source ?? "global"}
-                {s.source_label ? `:${s.source_label}` : ""})
-              </span>
-              {s.name && s.name !== s.id && (
-                <span className="text-fg-muted truncate">— {s.name}</span>
-              )}
-            </Label>
-          );
-        })}
-      </div>
-      <p className="text-xs text-fg-subtle mt-1.5">
-        Unchecked = hidden from the ACP child (daemon won't symlink the dir into the spawn
-        cwd).
-      </p>
     </div>
   );
 }
@@ -1319,6 +1198,34 @@ function SkillsTab({
           </p>
         )}
       </div>
+      {form.skills.length > 0 && (
+        <div className="border border-border rounded-lg p-3 space-y-2">
+          <Label className="text-sm font-medium text-fg block">Pinned skill versions</Label>
+          {form.skills.map((skill, index) => (
+            <div key={`${skill.type}:${skill.skill_id}`} className="flex items-center gap-2">
+              <span className="flex-1 min-w-0 truncate font-mono text-xs text-fg-muted">
+                {skill.skill_id}
+              </span>
+              <Input
+                value={skill.version ?? ""}
+                onChange={(event) => {
+                  const skills = [...form.skills];
+                  skills[index] = {
+                    ...skill,
+                    ...(event.target.value
+                      ? { version: event.target.value }
+                      : {}),
+                  };
+                  if (!event.target.value) delete skills[index].version;
+                  setForm({ ...form, skills });
+                }}
+                className="w-32 border border-border rounded px-2 py-1 text-xs bg-bg text-fg"
+                placeholder="latest"
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1353,7 +1260,7 @@ function McpTab({
             onClick={addMcp}
             className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
-            + Custom URL
+            + Custom server
           </Button>
         </div>
       </div>
@@ -1373,9 +1280,16 @@ function McpTab({
               />
             </div>
             <div className="w-24">
-              <Label className="text-xs text-fg-muted block mb-0.5">Type</Label>
-              <Select value={mcp.type} onValueChange={(v) => updateMcp(i, "type", v)}>
-                <SelectOption value="sse">sse</SelectOption>
+              <Label htmlFor={`mcp-type-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                Type
+              </Label>
+              <Select
+                id={`mcp-type-${i}`}
+                value={mcp.type}
+                onValueChange={(value) => updateMcp(i, "type", value)}
+                className={inputCls}
+              >
+                <SelectOption value="url">URL</SelectOption>
                 <SelectOption value="stdio">stdio</SelectOption>
               </Select>
             </div>
@@ -1387,18 +1301,61 @@ function McpTab({
               ×
             </Button>
           </div>
-          <div>
-            <Label htmlFor={`mcp-url-${i}`} className="text-xs text-fg-muted block mb-0.5">
-              URL
-            </Label>
-            <Input
-              id={`mcp-url-${i}`}
-              value={mcp.url}
-              onChange={(e) => updateMcp(i, "url", e.target.value)}
-              className={inputCls}
-              placeholder="https://mcp.github.com/sse"
-            />
-          </div>
+          {mcp.type === "url" ? (
+            <div>
+              <Label htmlFor={`mcp-url-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                URL
+              </Label>
+              <Input
+                id={`mcp-url-${i}`}
+                value={mcp.url}
+                onChange={(e) => updateMcp(i, "url", e.target.value)}
+                className={inputCls}
+                placeholder="https://mcp.github.com/sse"
+              />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div>
+                <Label htmlFor={`mcp-command-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Command (absolute sandbox path)
+                </Label>
+                <Input
+                  id={`mcp-command-${i}`}
+                  value={mcp.command}
+                  onChange={(e) => updateMcp(i, "command", e.target.value)}
+                  className={inputCls}
+                  placeholder="/usr/local/bin/my-mcp-server"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <Label htmlFor={`mcp-args-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                    Args (JSON array)
+                  </Label>
+                  <Input
+                    id={`mcp-args-${i}`}
+                    value={mcp.argsJson}
+                    onChange={(e) => updateMcp(i, "argsJson", e.target.value)}
+                    className={inputCls}
+                    placeholder='["--root", "/workspace"]'
+                  />
+                </div>
+                <div>
+                  <Label htmlFor={`mcp-env-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                    Non-secret env (JSON object)
+                  </Label>
+                  <Input
+                    id={`mcp-env-${i}`}
+                    value={mcp.envJson}
+                    onChange={(e) => updateMcp(i, "envJson", e.target.value)}
+                    className={inputCls}
+                    placeholder='{"LOG_LEVEL":"info"}'
+                  />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       ))}
       {form.mcpServers.length === 0 && (
@@ -1428,30 +1385,6 @@ function AgentsTab({
 }) {
   return (
     <div className="space-y-5">
-      {/* Built-in general sub-agent — opt-in. */}
-      <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
-        <Label className="flex items-start gap-2 text-sm cursor-pointer">
-          <Checkbox
-            checked={form.enableGeneralSubagent}
-            onCheckedChange={(checked) =>
-              setForm({ ...form, enableGeneralSubagent: checked === true })
-            }
-            className="mt-0.5"
-          />
-          <div>
-            <div className="font-medium text-fg">Enable general sub-agent</div>
-            <p className="text-xs text-fg-subtle mt-0.5">
-              Exposes a built-in{" "}
-              <span className="font-mono">general_subagent(task)</span> tool. Spawns a
-              generic sub-agent thread (reserved id{" "}
-              <span className="font-mono">general</span>) inheriting this agent's model +
-              sandbox, with a safe built-in tool subset
-              (bash/read/write/edit/grep/glob). No roster setup needed.
-            </p>
-          </div>
-        </Label>
-      </div>
-
       <div>
         <Label className="text-sm font-medium text-fg block">Callable Agents</Label>
         <p className="text-xs text-fg-subtle mb-2">
@@ -1470,6 +1403,30 @@ function AgentsTab({
             <div className="flex-1">
               <div className="text-sm font-medium text-fg">{agentInfo?.name || ca.id}</div>
               <div className="text-xs text-fg-subtle font-mono">{ca.id}</div>
+            </div>
+            <div className="w-24">
+              <Label htmlFor={`callable-version-${i}`} className="text-xs text-fg-subtle">
+                Version
+              </Label>
+              <Input
+                id={`callable-version-${i}`}
+                type="number"
+                min="1"
+                value={ca.version ?? ""}
+                onChange={(event) => {
+                  const callableAgents = [...form.callableAgents];
+                  if (event.target.value === "") {
+                    callableAgents[i] = { ...ca, version: undefined };
+                  } else {
+                    const version = Number(event.target.value);
+                    if (!Number.isInteger(version) || version < 1) return;
+                    callableAgents[i] = { ...ca, version };
+                  }
+                  setForm({ ...form, callableAgents });
+                }}
+                className="w-full border border-border rounded px-2 py-1 text-xs bg-bg text-fg"
+                placeholder="latest"
+              />
             </div>
             <Button variant="ghost"
               onClick={() => removeCallable(i)}

@@ -67,10 +67,25 @@ test("root Cloudflare test discovery excludes generated and Node-only trees", ()
       `generated test artifact was collected by the root Cloudflare test project: ${relativeFixturePath}`,
     );
     const nodeOnlyPackageTests = collectedFiles.filter((path) =>
-      [
+      path === "scripts/migration-compatibility.test.mjs" ||
+      path === "scripts/setup-cf.test.mjs" ||
+      path === "scripts/live-certification.test.mjs" ||
+      path === "scripts/offline-certification.test.mjs" ||
+      path === "scripts/local-release-certification.test.mjs" ||
+      path === "scripts/deepseek-live-certification.test.mjs" ||
+      path === "scripts/harness-in-sandbox-live-certification.test.mjs" || [
+        "apps/main-fly/",
+        "apps/main-vercel/",
         "packages/acp-runtime/",
         "packages/cli/",
+        "packages/environment-activation-",
+        "packages/environment-dispatch-",
+        "packages/harness-runtime-acp/",
         "packages/managed-agents-runtime/",
+        "packages/openai-agents-api/",
+        "packages/openai-agents-compat/",
+        "packages/openai-agents-sdk-audit/",
+        "packages/session-runtime-sql/test/",
         "packages/sandbox/test/",
       ].some((prefix) => path.startsWith(prefix)),
     );

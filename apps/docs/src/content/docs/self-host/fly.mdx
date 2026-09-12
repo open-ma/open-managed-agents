@@ -1,0 +1,129 @@
+---
+title: Deploy on Fly.io
+description: Run the portable Node control plane on one Fly Machine with a persistent volume or Fly Managed Postgres.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+OpenMA ships a Fly-specific deployment adapter at `apps/main-fly`, a checked-in
+`fly.toml`, and an idempotent setup command. The adapter only translates Fly
+Machine metadata into the portable Node contract; stores, harnesses, session
+leases, and sandbox provider drivers remain unchanged.
+
+## What the adapter owns
+
+- Derives `PUBLIC_BASE_URL` and `GATEWAY_ORIGIN` from `FLY_APP_NAME`.
+- Binds the service to `0.0.0.0:8080`.
+- Keeps SQLite, uploaded files, outputs, sandbox workspaces, and native harness
+  state under `/app/data`, the Fly Volume mount.
+- Starts `apps/main-node` only after those values are normalized.
+- Keeps one Machine running so schedulers and fallback pollers are not silently
+  suspended when HTTP traffic is idle.
+
+It does **not** replace the sandbox abstraction. Select E2B, Daytona, or a
+remote BoxRun runtime through the same Node Port used outside Fly. The Fly
+Machine hosts the control plane; it is not the agent sandbox. Deployable
+entrypoints never fall back to a host subprocess.
+
+## Deploy
+
+<Steps>
+
+1. **Clone and authenticate.**
+
+   ```bash
+   git clone https://github.com/openma-ai/open-managed-agents.git
+   cd open-managed-agents
+   fly auth login
+   ```
+
+   The setup command does not build this monorepo on Fly. It maps the checkout's
+   full Git SHA to `ghcr.io/openma-ai/open-managed-agents:sha-<git-sha>` and
+   deploys that prebuilt server release checkpoint.
+
+2. **Run the setup command.**
+
+   <Tabs>
+     <TabItem label="SQLite + Fly Volume">
+       ```bash
+       E2B_API_KEY=... \
+       OPENMA_FLY_DATA_MODE=sqlite \
+       OPENMA_FLY_SANDBOX_PROVIDER=e2b \
+       pnpm setup:fly
+       ```
+     </TabItem>
+     <TabItem label="Fly Managed Postgres">
+       ```bash
+       E2B_API_KEY=... \
+       OPENMA_FLY_DATA_MODE=postgres \
+       OPENMA_FLY_SANDBOX_PROVIDER=e2b \
+       pnpm setup:fly
+       ```
+     </TabItem>
+   </Tabs>
+
+   On a new app the command runs Fly Launch against the checked-in config,
+   stages locally generated `BETTER_AUTH_SECRET` and `PLATFORM_ROOT_SECRET`,
+   plus the selected sandbox provider configuration, deploys with a rolling
+   strategy, and prints the configured health checks. Existing application
+   secrets are never rotated implicitly; provider configuration is updated to
+   match the explicit selection.
+
+   For an audited promotion, pin the registry digest directly:
+
+   ```bash
+   OPENMA_FLY_IMAGE=ghcr.io/openma-ai/open-managed-agents@sha256:... \
+   E2B_API_KEY=... \
+   OPENMA_FLY_SANDBOX_PROVIDER=e2b \
+   pnpm setup:fly
+   ```
+
+   Mutable tags such as `latest` are rejected. Maintainers can explicitly set
+   `OPENMA_FLY_BUILD_FROM_SOURCE=1` to exercise the checked-in Dockerfile while
+   developing; that slower path is not the one-click deployment path.
+
+3. **Verify.**
+
+   ```bash
+   fly checks list
+   fly status
+   curl https://YOUR_APP.fly.dev/health
+   ```
+
+</Steps>
+
+## Persistence contract
+
+`fly.toml` declares an `openma_data` volume at `/app/data`. `initial_size`
+allows Fly Launch to create the first 10 GB volume during the initial deploy;
+scheduled snapshots retain 14 days, and the volume can auto-extend up to 50 GB.
+
+<Aside type="caution" title="SQLite stays single-Machine">
+  A Fly Volume attaches to one Machine at a time. Keep SQLite mode at one
+  Machine. For multiple control-plane replicas, use Managed Postgres plus
+  shared S3-compatible blob storage; local sandbox workdirs still are not a
+  cross-Machine shared filesystem.
+</Aside>
+
+## Security boundary
+
+The setup page never receives credentials. The local setup command sends the
+selected sandbox provider credential directly to Fly secrets without printing
+it; `openma.dev` never sees the value. Add a tenant-scoped Model Card after the
+Console is healthy, or set model-provider secrets directly with `fly secrets`.
+The Node work-scoped HTTP MCP gateway remains available. Direct arbitrary HTTPS
+credential injection still requires a reachable `oma-vault` deployment and its
+CA; Fly does not add that network interception automatically.
+
+## Redeploy
+
+```bash
+git pull --ff-only
+pnpm setup:fly
+fly checks list
+```
+
+The `main-fly` package contains no Fly SDK dependency. Fly lifecycle remains in
+`fly.toml` and `flyctl`, while application behavior stays behind OpenMA Ports.
+The source Dockerfile is retained as an explicit development escape hatch; the
+normal setup command always supplies the immutable image to `fly deploy`.

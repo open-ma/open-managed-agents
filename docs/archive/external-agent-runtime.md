@@ -5,7 +5,7 @@ Created: 2026-04-13
 
 ## Context
 
-open-managed-agents 当前只有一种 runtime 模式：平台通过 DefaultHarness 驱动 Anthropic API，工具在 Cloudflare Container 沙箱中执行。目标是将流行的 local coding agent（Claude Code、Codex、OpenCode、OpenClaw、Hermes）接入平台，让它们作为可选的 agent runtime 运行，同时复用平台的 session lifecycle、event streaming、memory、multi-agent、outcome evaluation 等能力。
+open-managed-agents 当前只有一种 runtime 模式：平台通过 DefaultHarness 驱动 Anthropic API，工具在 Cloudflare Container 沙箱中执行。目标是将流行的 local coding agent（Claude Code、Codex、OpenCode、Hermes）接入平台，让它们作为可选的 agent runtime 运行，同时复用平台的 session lifecycle、event streaming、memory、multi-agent、outcome evaluation 等能力。
 
 参考实现：
 - **multica** — 已验证 5 种 agent 的统一 `Backend.Execute()` 抽象
@@ -92,7 +92,6 @@ export interface ExternalAgentResult {
 | **Claude Code** | `claude -p --output-format stream-json --input-format stream-json` | stdin/stdout NDJSON |
 | **Codex** | `codex app-server --listen stdio://` | JSON-RPC 2.0 |
 | **OpenCode** | `opencode run --format json` | NDJSON |
-| **OpenClaw** | `openclaw agent --local --json` | stderr JSON |
 | **Hermes** | `hermes acp` | ACP JSON-RPC 2.0 |
 
 统一 adapter 接口：
@@ -184,7 +183,6 @@ export class ExternalAgentHarness implements HarnessInterface {
 registerHarness("claude-code", () => new ExternalAgentHarness("claude-code"));
 registerHarness("codex", () => new ExternalAgentHarness("codex"));
 registerHarness("opencode", () => new ExternalAgentHarness("opencode"));
-registerHarness("openclaw", () => new ExternalAgentHarness("openclaw"));
 registerHarness("hermes", () => new ExternalAgentHarness("hermes"));
 ```
 
@@ -265,7 +263,7 @@ Agent CLI 预装在容器镜像中。扩展 `EnvironmentConfig`：
 export interface EnvironmentConfig {
   config: {
     type: "cloud";
-    runtime?: "default" | "claude-code" | "codex" | "opencode" | "openclaw" | "hermes";
+    runtime?: "default" | "claude-code" | "codex" | "opencode" | "hermes";
     // runtime 决定使用哪个容器镜像和 harness
     // ...existing fields...
   };

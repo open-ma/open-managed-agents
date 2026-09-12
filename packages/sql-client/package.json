@@ -5,23 +5,41 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./adapters/cf-do": "./src/adapters/cf-do.ts",
     "./adapters/cf-d1": "./src/adapters/cf-d1.ts",
     "./adapters/better-sqlite3": "./src/adapters/better-sqlite3.ts",
-    "./adapters/postgres": "./src/adapters/postgres.ts"
+    "./adapters/postgres": "./src/adapters/postgres.ts",
+    "./adapters/mysql2": "./src/adapters/mysql2.ts"
+  },
+  "scripts": {
+    "test:integration:mysql": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*"
   },
   "peerDependencies": {
     "better-sqlite3": "^13.0.3",
+    "mysql2": "^3.24.4",
     "postgres": "^3.4.0"
   },
   "peerDependenciesMeta": {
     "better-sqlite3": {
       "optional": true
     },
+    "mysql2": {
+      "optional": true
+    },
     "postgres": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@testcontainers/mysql": "^12.1.0",
+    "@types/node": "26.5.0",
+    "better-sqlite3": "^13.0.3",
+    "mysql2": "^3.24.4",
+    "postgres": "^3.4.0",
+    "vitest": "^4.1.3"
   }
 }

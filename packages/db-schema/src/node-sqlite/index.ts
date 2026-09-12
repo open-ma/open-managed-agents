@@ -13,3 +13,6 @@ export * from "../cf-auth";
 export * from "../cf-integrations";
 export * from "../cf-router";
 export * from "./feishu-ops";
+// `cf-auth` already exports the SQLite execution-control table.  Keep the
+// Node barrel as a union without re-exporting a second declaration of the
+// same table (which makes TypeScript report an ambiguous export).

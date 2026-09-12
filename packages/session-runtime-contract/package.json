@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./coordination": "./src/coordination.ts",
     "./context": "./src/context.ts",
     "./dispatch": "./src/dispatch.ts",
     "./history": "./src/history.ts",

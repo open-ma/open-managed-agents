@@ -99,15 +99,22 @@ export class SqlFileRepo implements FileRepo {
     return existing;
   }
 
-  async deleteBySession(sessionId: string): Promise<FileRow[]> {
+  async deleteBySession(tenantId: string, sessionId: string): Promise<FileRow[]> {
     // Two-step: SELECT then DELETE so we can return the deleted rows for R2
     // cleanup. A single transaction would be ideal but D1.batch can't mix
     // SELECT into a write batch — and per-row delete would amplify roundtrips.
     const rows = await getAll<typeof files.$inferSelect>(
-      this.db.select().from(files).where(eq(files.session_id, sessionId)),
+      this.db
+        .select()
+        .from(files)
+        .where(and(eq(files.tenant_id, tenantId), eq(files.session_id, sessionId))),
     );
     if (!rows.length) return [];
-    await runOnce(this.db.delete(files).where(eq(files.session_id, sessionId)));
+    await runOnce(
+      this.db
+        .delete(files)
+        .where(and(eq(files.tenant_id, tenantId), eq(files.session_id, sessionId))),
+    );
     return rows.map(toRow);
   }
 }

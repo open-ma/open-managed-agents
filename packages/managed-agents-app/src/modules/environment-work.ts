@@ -5,6 +5,7 @@ import {
   type EnvironmentWorkAvailabilityWaiterPort,
   type EnvironmentWorkEnvironmentSourcePort,
   type EnvironmentWorkSessionCredentialIssuerPort,
+  type EnvironmentWorkWakeupPort,
 } from "@open-managed-agents/managed-agents-application";
 import type { EnvironmentWorkStore } from "@open-managed-agents/environment-work-store";
 
@@ -40,6 +41,11 @@ export const environmentWorkSessionCredentialIssuerPort =
     "managed-agents.outbound.environment-work.session-credential-issuer",
   );
 
+export const environmentWorkWakeupPort =
+  createPortToken<EnvironmentWorkWakeupPort>(
+    "managed-agents.outbound.environment-work.wakeup",
+  );
+
 export const environmentSessionWorkEnqueuerPort =
   createPortToken<EnvironmentSessionWorkEnqueuerPort>(
     "managed-agents.application.environment-work-enqueuer",
@@ -55,6 +61,7 @@ export function environmentWorkModule(): AppModule {
       environmentWorkStorePort,
       environmentWorkEnvironmentSourcePort,
       environmentWorkAvailabilityWaiterPort,
+      environmentWorkSessionCredentialIssuerPort,
     ],
     setup({ port }) {
       return {
@@ -65,6 +72,7 @@ export function environmentWorkModule(): AppModule {
             environments: port(environmentWorkEnvironmentSourcePort),
             store: port(environmentWorkStorePort),
             availability: port(environmentWorkAvailabilityWaiterPort),
+            credentials: port(environmentWorkSessionCredentialIssuerPort),
             clock: port(clockPort),
           }),
         )],
@@ -83,6 +91,7 @@ export function environmentWorkEnqueuerModule(): AppModule {
       idGeneratorPort,
       environmentWorkStorePort,
       environmentWorkSessionCredentialIssuerPort,
+      environmentWorkWakeupPort,
     ],
     setup({ port }) {
       const ids = port(idGeneratorPort);
@@ -93,6 +102,7 @@ export function environmentWorkEnqueuerModule(): AppModule {
             workspaceId: port(workspaceContextPort).workspaceId,
             store: port(environmentWorkStorePort),
             credentials: port(environmentWorkSessionCredentialIssuerPort),
+            wakeup: port(environmentWorkWakeupPort),
             clock: port(clockPort),
             ids: { nextEnvironmentWorkId: () => ids.next("environment-work") },
           }),
