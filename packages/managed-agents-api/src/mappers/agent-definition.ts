@@ -440,6 +440,9 @@ export function fromAgentModel(model: AgentModel): object {
     ...(model.inferenceGeo !== undefined && {
       inference_geo: model.inferenceGeo,
     }),
+    ...(model.providerOptions !== undefined && {
+      provider_options: model.providerOptions,
+    }),
     ...(model.speed !== undefined && { speed: model.speed }),
   };
 }

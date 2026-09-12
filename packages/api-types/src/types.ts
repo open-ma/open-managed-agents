@@ -49,6 +49,8 @@ export interface AgentConfig {
   model: string | {
     id: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    inference_geo?: string;
+    provider_options?: Record<string, unknown>;
     speed?: "standard" | "fast";
   };
   system: string;
@@ -81,7 +83,13 @@ export interface AgentConfig {
    * When unset, tools that would benefit from summarization fall back to
    * returning raw content. Set this to opt into compressed tool results.
    */
-  aux_model?: string | { id: string; speed?: "standard" | "fast" };
+  aux_model?: string | {
+    id: string;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    inference_geo?: string;
+    provider_options?: Record<string, unknown>;
+    speed?: "standard" | "fast";
+  };
   harness?: string;
   /** ACP process configuration for the `acp-sandbox` harness. The process is
    * spawned inside the session Sandbox through SandboxDuplexProcessPort; the

@@ -234,6 +234,29 @@ Or use plain `fetch` — every OMA endpoint is JSON, no extra runtime needed.
 
 A small set of OMA-specific agent fields (auxiliary model, harness selector, sandbox runtime binding) are passed under an `_oma:` body field on Agent create / update calls. OpenMA reads them; do not send `_oma` to an Anthropic endpoint. They are optional — agents that omit `_oma` use the vanilla Claude Managed Agents shape.
 
+Provider-specific inference options are JSON and stay on the model they affect:
+
+```ts
+await client.beta.agents.update("agent_abc123", {
+  model: {
+    id: "deepseek-chat",
+    provider_options: {
+      pi: { reasoning: "off", samplingParams: { temperature: 0 } },
+    },
+  },
+  _oma: {
+    aux_model: {
+      id: "deepseek-chat",
+      provider_options: { pi: { reasoning: "off" } },
+    },
+  },
+});
+```
+
+The main model options reach main-turn and compaction calls. Auxiliary options
+reach tool-internal model calls such as `web_fetch` summarization. Keep custom
+Agent extensions under `_oma`; arbitrary root fields are rejected.
+
 | Field | Purpose |
 |---|---|
 | `aux_model` | Auxiliary model used for tool-internal LLM work (e.g. `web_fetch` summarization). When unset, tools fall back to returning raw content. |

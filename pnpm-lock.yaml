@@ -243,6 +243,9 @@ importers:
       '@openma/common':
         specifier: github:openma-ai/openma-common#00358ff9c1e4a694171f5617a4715602c61433e7
         version: https://codeload.github.com/openma-ai/openma-common/tar.gz/00358ff9c1e4a694171f5617a4715602c61433e7(@anthropic-ai/sdk@0.120.0(zod@4.4.3))(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.4.3)
+      '@openma/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@radix-ui/react-collapsible':
         specifier: ^1.1.12
         version: 1.1.12(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

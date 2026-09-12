@@ -18,6 +18,9 @@ const session: Session = {
       id: "claude-opus-5",
       effort: "high",
       inferenceGeo: "us",
+      providerOptions: {
+        pi: { reasoning: "high", sampling: { temperature: 0 } },
+      },
       speed: "fast",
     },
     multiagent: {
@@ -40,7 +43,11 @@ const session: Session = {
     },
     name: "Coordinator",
     openma: {
-      auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+      auxiliaryModel: {
+        id: "deepseek-chat",
+        providerOptions: { pi: { reasoning: "off" } },
+        speed: "fast",
+      },
       appendablePrompts: ["prompt_review"],
       harness: "pi",
       acp: {
@@ -142,8 +149,13 @@ describe("managed Agent to legacy Node harness codec", () => {
     })).resolves.toEqual({
       model,
       modelInfo: { model_id: "deepseek-chat" },
+      providerOptions: { pi: { reasoning: "off" } },
     });
-    expect(selectedModels).toEqual([{ id: "deepseek-chat", speed: "fast" }]);
+    expect(selectedModels).toEqual([{
+      id: "deepseek-chat",
+      providerOptions: { pi: { reasoning: "off" } },
+      speed: "fast",
+    }]);
   });
 
   it("projects Environment networking policy for the shared harness tools", () => {
@@ -184,7 +196,15 @@ describe("managed Agent to legacy Node harness codec", () => {
     expect(toLegacyHarnessAgentConfig(session)).toEqual({
       id: "agent_coordinator",
       name: "Coordinator",
-      model: { id: "claude-opus-5", effort: "high", speed: "fast" },
+      model: {
+        id: "claude-opus-5",
+        effort: "high",
+        inference_geo: "us",
+        provider_options: {
+          pi: { reasoning: "high", sampling: { temperature: 0 } },
+        },
+        speed: "fast",
+      },
       system: "Coordinate carefully",
       tools: [
         {
@@ -249,7 +269,11 @@ describe("managed Agent to legacy Node harness codec", () => {
           { type: "advisor", model: "claude-haiku-4-5" },
         ],
       },
-      aux_model: { id: "deepseek-chat", speed: "fast" },
+      aux_model: {
+        id: "deepseek-chat",
+        provider_options: { pi: { reasoning: "off" } },
+        speed: "fast",
+      },
       appendable_prompts: ["prompt_review"],
       harness: "pi",
       acp: {

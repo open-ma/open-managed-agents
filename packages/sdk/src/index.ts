@@ -11,6 +11,8 @@ export type {
   OpenMaAgentExtensionParams,
   OpenMaAgentModelParams,
   OpenMaAgentRuntimeBindingParams,
+  OpenMaJsonValue,
+  OpenMaProviderOptions,
 } from "./agents.js";
 
 export {

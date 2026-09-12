@@ -43,9 +43,20 @@ describe("SqlAgentStore", () => {
       description: null,
       mcpServers: [],
       metadata: {},
-      model: { id: "claude-opus-5" },
+      model: {
+        id: "claude-opus-5",
+        providerOptions: {
+          anthropic: { beta: ["context-1m"], request: { priority: null } },
+        },
+      },
       multiagent: null,
       name: "Agent One",
+      openma: {
+        auxiliaryModel: {
+          id: "deepseek-chat",
+          providerOptions: { pi: { reasoning: "off" } },
+        },
+      },
       skills: [],
       system: null,
       tools: [],
