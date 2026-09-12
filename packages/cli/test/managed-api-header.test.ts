@@ -34,6 +34,23 @@ afterEach(async () => {
 });
 
 describe("Managed Agents CLI transport", () => {
+  it("surfaces the socket error code when runtime list cannot reach the server", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("test server did not bind TCP");
+    }
+    const baseURL = `http://127.0.0.1:${address.port}`;
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+
+    await expect(runCli(baseURL, "runtime", "list")).rejects.toMatchObject({
+      stderr: expect.stringContaining("ECONNREFUSED"),
+    });
+  });
+
   it("sends the official Managed Agents beta header on v1 commands", async () => {
     let receivedBeta: string | undefined;
     const baseURL = await listen((request, response) => {
