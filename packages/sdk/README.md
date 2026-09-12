@@ -31,6 +31,29 @@ const card = await client.oma.modelCards.create({
 });
 ```
 
+Agent extensions stay on the official resource under the optional `_oma`
+namespace and are strongly typed on create, update, Agent responses, and
+version-pinned Session snapshots:
+
+```ts
+const agent = await client.beta.agents.create({
+  name: "reviewer",
+  model: { id: "deepseek-main", speed: "fast" },
+  _oma: {
+    aux_model: { id: "deepseek-aux" },
+    appendable_prompts: ["prompt_review"],
+    harness: "pi",
+  },
+});
+
+const session = await client.beta.sessions.create({
+  agent: agent.id,
+  environment_id: "env_default",
+});
+
+console.log(session.agent._oma?.aux_model?.id);
+```
+
 ## Object model
 
 ```ts

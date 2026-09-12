@@ -180,4 +180,35 @@ describe("agent endpoint boundary", () => {
     expect(payload).not.toHaveProperty("created_at");
     expect(payload).not.toHaveProperty("updated_at");
   });
+
+  it("round-trips typed OpenMA fields and emits explicit clears", () => {
+    const agent = sampleAgent({
+      _oma: {
+        aux_model: { id: "deepseek-chat", speed: "fast" },
+        appendable_prompts: ["prompt_review", "prompt_security"],
+        harness: "pi",
+      },
+    });
+    const form = agentToForm(agent);
+
+    expect(form.auxiliaryModel).toBe("deepseek-chat");
+    expect(form.auxiliaryModelSpeed).toBe("fast");
+    expect(form.appendablePrompts).toEqual([
+      "prompt_review",
+      "prompt_security",
+    ]);
+
+    form.auxiliaryModel = "";
+    form.auxiliaryModelSpeed = "";
+    form.appendablePrompts = [];
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
+
+    expect(payload._oma).toEqual({
+      aux_model: null,
+      appendable_prompts: [],
+      harness: "pi",
+    });
+  });
 });

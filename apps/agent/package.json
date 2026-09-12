@@ -19,6 +19,7 @@
     "./harness/acp-agent-state": "./src/harness/acp-agent-state.ts",
     "./harness/platform-guidance": "./src/harness/platform-guidance.ts",
     "./runtime/history": "./src/runtime/history.ts",
+    "./runtime/appendable-prompts": "./src/runtime/appendable-prompts.ts",
     "./runtime/managed-runtime": "./src/runtime/managed-runtime.ts"
   },
   "dependencies": {

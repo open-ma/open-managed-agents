@@ -11,6 +11,7 @@ import type {
 } from "@open-managed-agents/managed-agents-application";
 import type { SessionResourceSecretSource } from "@open-managed-agents/session-resource-store";
 import type { NodeManagedMemorySnapshotPort } from "./node-managed-memory-snapshots.js";
+import { resolveAppendablePrompts } from "@open-managed-agents/agent/runtime/appendable-prompts";
 
 type FileSource = Pick<FilesApplicationPort, "downloadFile">;
 type SkillVersionSource = Pick<
@@ -46,6 +47,17 @@ export function buildNodeManagedSkillReminders(
       text: `Custom skill ${skill.skillId} is mounted at ${mountRoot}. Locate and read its SKILL.md before applying it.`,
     }];
   });
+}
+
+export function buildNodeManagedAppendablePromptReminders(
+  session: Session,
+): Array<{ source: string; text: string }> {
+  return resolveAppendablePrompts(
+    session.agent.openma?.appendablePrompts ?? [],
+  ).map((prompt) => ({
+    source: `appendable:${prompt.id}`,
+    text: prompt.content,
+  }));
 }
 
 function shellQuote(value: string): string {

@@ -152,6 +152,76 @@ describe("AgentsApplicationService", () => {
     });
   });
 
+  it("versions OpenMA extensions atomically and supports explicit field clears", async () => {
+    let now = new Date("2026-08-26T00:00:00.000Z");
+    const service = new AgentsApplicationService({
+      workspaceId: "workspace_01",
+      store: new MemoryAgentStore(),
+      clock: { now: () => now },
+      ids: { nextAgentId: () => "agent_openma" },
+    });
+
+    await service.createAgent({
+      name: "Extended Agent",
+      model: "claude-opus-5",
+      openma: {
+        auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+        appendablePrompts: ["prompt_review"],
+        harness: "pi",
+      },
+    });
+    now = new Date("2026-08-26T01:00:00.000Z");
+    const updated = await service.updateAgent({
+      agentId: "agent_openma",
+      expectedVersion: 1,
+      openma: {
+        auxiliaryModel: null,
+        appendablePrompts: [],
+      },
+    });
+    const previous = await service.retrieveAgent({
+      agentId: "agent_openma",
+      version: 1,
+    });
+
+    expect(updated).toMatchObject({
+      type: "updated",
+      agent: {
+        version: 2,
+        openma: {
+          appendablePrompts: [],
+          harness: "pi",
+        },
+      },
+    });
+    expect(updated).not.toMatchObject({
+      agent: { openma: { auxiliaryModel: expect.anything() } },
+    });
+    expect(previous).toMatchObject({
+      type: "found",
+      agent: {
+        version: 1,
+        openma: {
+          auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+          appendablePrompts: ["prompt_review"],
+          harness: "pi",
+        },
+      },
+    });
+
+    now = new Date("2026-08-26T02:00:00.000Z");
+    const cleared = await service.updateAgent({
+      agentId: "agent_openma",
+      expectedVersion: 2,
+      openma: {
+        appendablePrompts: null,
+        harness: null,
+      },
+    });
+    expect(cleared).toMatchObject({ type: "updated", agent: { version: 3 } });
+    expect(cleared).not.toHaveProperty("agent.openma");
+  });
+
   it("resolves toolset defaults and per-tool inheritance before persistence", async () => {
     const service = new AgentsApplicationService({
       workspaceId: "workspace_01",

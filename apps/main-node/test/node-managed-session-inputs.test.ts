@@ -73,6 +73,25 @@ describe("NodeManagedSessionInputPreparer", () => {
     }]);
   });
 
+  it("resolves version-pinned appendable prompts into system prompt reminders", () => {
+    const session = managedSession();
+    session.agent.openma = { appendablePrompts: ["linear-mcp", "missing"] };
+    const buildReminders = (nodeManagedInputs as Record<string, unknown>)
+      .buildNodeManagedAppendablePromptReminders as undefined | ((session: Session) => Array<{
+        source: string;
+        text: string;
+      }>);
+    expect(buildReminders).toBeTypeOf("function");
+    if (buildReminders === undefined) return;
+
+    expect(buildReminders(session)).toEqual([
+      expect.objectContaining({
+        source: "appendable:linear-mcp",
+        text: expect.stringContaining("linear_say"),
+      }),
+    ]);
+  });
+
   it("materializes file, pinned repository revision, and custom skill before execution", async () => {
     const writeFileBytes = vi.fn(async () => "written");
     const gitCheckout = vi.fn(async () => undefined);

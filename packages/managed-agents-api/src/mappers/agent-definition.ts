@@ -13,6 +13,7 @@ import type {
   JsonValue,
 } from "@open-managed-agents/managed-agents-application";
 import type { AgentCreateBody } from "../contracts/agents";
+import { fromOpenMaAgentExtension } from "./openma-agent-extension";
 
 type WireMcpServer = NonNullable<AgentCreateBody["mcp_servers"]>[number];
 type WireMultiagent = Exclude<
@@ -453,6 +454,10 @@ export function fromSessionThreadAgent(agent: SessionThreadAgent): object {
     mcp_servers: agent.mcpServers.map(fromAgentMcpServerInput),
     model: fromAgentModel(agent.model),
     name: agent.name,
+    ...(agent.openma !== undefined &&
+      Object.keys(agent.openma).length > 0 && {
+        _oma: fromOpenMaAgentExtension(agent.openma),
+      }),
     skills: agent.skills.map(fromAgentSkillInput),
     system: agent.system,
     tools: agent.tools.map(fromAgentToolInput),

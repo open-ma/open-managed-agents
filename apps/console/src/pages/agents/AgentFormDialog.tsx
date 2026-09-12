@@ -819,6 +819,75 @@ function BasicTab({
             />
           </div>
         )}
+      <div className="grid grid-cols-[minmax(0,1fr)_9rem] gap-3">
+        <div>
+          <Label className="text-sm text-fg-muted block mb-1">
+            Auxiliary model
+          </Label>
+          <Combobox<ModelCard>
+            value={
+              modelCards.find((card) => card.model_id === form.auxiliaryModel)?.id ?? ""
+            }
+            onValueChange={(value, item) =>
+              setForm({
+                ...form,
+                auxiliaryModel: item?.model_id ?? (value ? form.auxiliaryModel : ""),
+              })
+            }
+            endpoint="/v1/oma/model_cards"
+            searchParam="q"
+            pagination="oma"
+            getValue={(card) => card.id}
+            getLabel={(card) => card.model_id}
+            getTextLabel={(card) => card.model_id}
+            placeholder="None"
+          />
+        </div>
+        <div>
+          <Label className="text-sm text-fg-muted block mb-1">Speed</Label>
+          <Select
+            value={form.auxiliaryModelSpeed || "default"}
+            disabled={!form.auxiliaryModel}
+            onValueChange={(value) =>
+              setForm({
+                ...form,
+                auxiliaryModelSpeed:
+                  value === "standard" || value === "fast" ? value : "",
+              })
+            }
+            className={inputCls}
+          >
+            <SelectOption value="default">default</SelectOption>
+            <SelectOption value="standard">standard</SelectOption>
+            <SelectOption value="fast">fast</SelectOption>
+          </Select>
+        </div>
+      </div>
+      <div>
+        <Label
+          htmlFor="agent-appendable-prompts"
+          className="text-sm text-fg-muted block mb-1"
+        >
+          Appendable prompt IDs
+        </Label>
+        <Textarea
+          id="agent-appendable-prompts"
+          value={form.appendablePrompts.join("\n")}
+          onChange={(event) =>
+            setForm({
+              ...form,
+              appendablePrompts: event.target.value
+                .split("\n")
+                .map((value) => value.trim())
+                .filter(Boolean),
+            })
+          }
+          rows={3}
+          className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+          placeholder="prompt_review\nprompt_security"
+        />
+        <p className="mt-1 text-xs text-fg-subtle">One prompt ID per line.</p>
+      </div>
       <div>
         <Label htmlFor="agent-description" className="text-sm text-fg-muted block mb-1">
           Description

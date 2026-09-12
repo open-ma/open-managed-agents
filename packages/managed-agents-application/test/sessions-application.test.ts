@@ -168,6 +168,11 @@ const agent: Agent = {
   model: { id: "claude-opus-5", effort: "high", speed: "standard" },
   multiagent: null,
   name: "Coding Agent",
+  openma: {
+    auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+    appendablePrompts: ["prompt_review"],
+    harness: "pi",
+  },
   skills: [{ type: "anthropic", skillId: "pdf", version: "latest" }],
   system: "Work carefully",
   tools: [
@@ -381,6 +386,11 @@ describe("SessionsApplicationService", () => {
           },
           multiagent: null,
           name: "Coding Agent",
+          openma: {
+            auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+            appendablePrompts: ["prompt_review"],
+            harness: "pi",
+          },
           skills: [
             { type: "anthropic", skillId: "pdf", version: "latest" },
           ],

@@ -39,6 +39,23 @@ const session: Session = {
       ],
     },
     name: "Coordinator",
+    openma: {
+      auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+      appendablePrompts: ["prompt_review"],
+      harness: "pi",
+      acp: {
+        agent: { id: "pi", command: "pi-acp", args: ["--stdio"] },
+        restart: { mode: "on-crash", maxRestarts: 2, windowMs: 30_000 },
+        idleTimeoutMs: 60_000,
+        perTurnTimeoutMs: 120_000,
+      },
+      runtimeBinding: {
+        runtimeId: "runtime_local",
+        acpAgentId: "pi",
+        localSkillBlocklist: ["unsafe-skill"],
+      },
+      enableGeneralSubagent: true,
+    },
     skills: [{ type: "custom", skillId: "skill_review", version: "3" }],
     system: "Coordinate carefully",
     tools: [
@@ -108,6 +125,27 @@ const session: Session = {
 };
 
 describe("managed Agent to legacy Node harness codec", () => {
+  it("resolves the pinned auxiliary model for tool execution", async () => {
+    const resolveAuxiliary = (managedAgentCodec as Record<string, unknown>)
+      .resolveNodeManagedAuxiliaryToolModel as undefined | ((
+        session: Session,
+        buildModel: (model: Session["agent"]["model"]) => Promise<unknown>,
+      ) => Promise<unknown>);
+    expect(resolveAuxiliary).toBeTypeOf("function");
+    if (resolveAuxiliary === undefined) return;
+    const selectedModels: Session["agent"]["model"][] = [];
+    const model = { provider: "test-model" };
+
+    await expect(resolveAuxiliary(session, async (selected) => {
+      selectedModels.push(selected);
+      return model;
+    })).resolves.toEqual({
+      model,
+      modelInfo: { model_id: "deepseek-chat" },
+    });
+    expect(selectedModels).toEqual([{ id: "deepseek-chat", speed: "fast" }]);
+  });
+
   it("projects Environment networking policy for the shared harness tools", () => {
     const encodeEnvironment = (managedAgentCodec as Record<string, unknown>)
       .toLegacyHarnessEnvironmentConfig as undefined | ((environment: unknown) => unknown);
@@ -211,6 +249,21 @@ describe("managed Agent to legacy Node harness codec", () => {
           { type: "advisor", model: "claude-haiku-4-5" },
         ],
       },
+      aux_model: { id: "deepseek-chat", speed: "fast" },
+      appendable_prompts: ["prompt_review"],
+      harness: "pi",
+      acp: {
+        agent: { id: "pi", command: "pi-acp", args: ["--stdio"] },
+        restart: { mode: "on-crash", max_restarts: 2, window_ms: 30_000 },
+        idle_timeout_ms: 60_000,
+        per_turn_timeout_ms: 120_000,
+      },
+      runtime_binding: {
+        runtime_id: "runtime_local",
+        acp_agent_id: "pi",
+        local_skill_blocklist: ["unsafe-skill"],
+      },
+      enable_general_subagent: true,
       version: 4,
       created_at: "2026-08-26T00:00:00.000Z",
       updated_at: "2026-08-26T00:00:01.000Z",
