@@ -38,8 +38,8 @@ STORE_BACKENDS={"agents":"pg","sessions":"cf"}
 You can move one store at a time. The harness, routes, and Console don't
 change.
 
-The sandbox layer has the same shape — `LocalSubprocess`, `LiteBox`,
-`E2B`, `Daytona`, `BoxRun` are all swappable for the Cloudflare Sandbox.
+The sandbox layer has the same shape — `LiteBox`, `E2B`, `Daytona`, and
+`BoxRun` are all swappable for the Cloudflare Sandbox.
 
 ## What's tightly coupled
 

@@ -120,7 +120,7 @@ semantics do not depend on `pi-agent-core` internals.
 
 The sandbox placement is provider-neutral: every ACP process uses the
 `SandboxDuplexProcessPort`, whether the backing runtime is a Cloudflare
-Container, a local subprocess, or E2B. Stateful ACP sessions retain one child
+Container, LiteBox, or E2B. Stateful ACP sessions retain one child
 across turns, renew the provider lease during a turn, and persist the native
 ACP session id in the workspace so a restored sandbox can resume it.
 

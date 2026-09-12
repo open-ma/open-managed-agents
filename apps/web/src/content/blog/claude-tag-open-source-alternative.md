@@ -90,7 +90,7 @@ That is the gap Open Managed Agents is designed for.
 | Channel model | Channel-scoped Claude | Per-channel sessions for a published agent |
 | Memory | Claude Tag channel/workspace memory | Platform memory stores under your deployment |
 | Tools | Admin-enabled tools and repositories | Built-in tools, MCP servers, custom integration providers |
-| Sandbox | Anthropic-managed | Cloudflare Containers, local subprocess, LiteBox, E2B, Daytona, BoxRun |
+| Sandbox | Anthropic-managed | Cloudflare Containers, LiteBox, E2B, Daytona, BoxRun |
 | Agent loop | Anthropic-managed | Default harness or your own harness |
 | Best fit | Teams already standardized on Claude Enterprise/Team | Teams that want open, self-hosted, model-flexible agent infrastructure |
 
