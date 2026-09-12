@@ -1,8 +1,9 @@
 import { Input } from "@/components/ui/input";
 import { startTransition, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, Link } from "react-router";
-import { ApiError, useApi } from "../lib/api";
+import { ApiError } from "../lib/api";
 import { useManagedApi } from "../lib/useManagedApi";
+import { readManagedMetadataObject } from "../lib/managed-metadata";
 import { toast } from "sonner";
 import { Markdown } from "../components/Markdown";
 import { formatDuration, formatRelative, shortenId } from "../lib/format";
@@ -82,7 +83,6 @@ function waitForStreamRetry(ms: number, signal: AbortSignal): Promise<void> {
 
 export function SessionDetail() {
   const { id } = useParams();
-  const { api } = useApi();
   const managedApi = useManagedApi();
   const { t } = useI18n();
   const [events, setEvents] = useState<Event[]>([]);
@@ -515,6 +515,8 @@ export function SessionDetail() {
     setToolInputStreams(new Map());
     setAgentId("");
     setSessionMeta({});
+    setLinear(null);
+    setSlack(null);
     setEditingTitle(false);
     setTitleDraft("");
     setSavingTitle(false);
@@ -539,6 +541,23 @@ export function SessionDetail() {
         });
         setTitleDraft(s.title ?? "");
 
+        const linearMeta = readManagedMetadataObject(s.metadata, "linear") as
+          | { issueId?: string; issueIdentifier?: string; workspaceId?: string }
+          | null;
+        setLinear(
+          linearMeta && (linearMeta.issueId || linearMeta.issueIdentifier)
+            ? linearMeta
+            : null,
+        );
+        const slackMeta = readManagedMetadataObject(s.metadata, "slack") as
+          | { channelId?: string; threadTs?: string; workspaceId?: string; eventKind?: string; publicationId?: string }
+          | null;
+        setSlack(
+          slackMeta && (slackMeta.channelId || slackMeta.threadTs)
+            ? slackMeta
+            : null,
+        );
+
         // Live-resolve env + vault names by id. Per the id-only ref decision
         // (memory: session-resource-refs), the session API does not pre-bake
         // display data — clients fetch resources on demand. Names appear a
@@ -558,23 +577,6 @@ export function SessionDetail() {
             ),
           ).then((vaults) => setSessionMeta((prev) => ({ ...prev, vaults })));
         }
-      })
-      .catch(() => {});
-
-    // Integration metadata is an OpenMA product projection, not part of the
-    // Managed Session DTO. Fetch only that extension from the OMA namespace.
-    api<{ metadata?: Record<string, unknown> }>(`/v1/oma/sessions/${id}`)
-      .then((s) => {
-        const linearMeta = s.metadata?.linear as
-          | { issueId?: string; issueIdentifier?: string; workspaceId?: string }
-          | undefined;
-        if (linearMeta && (linearMeta.issueId || linearMeta.issueIdentifier)) {
-          setLinear(linearMeta);
-        }
-        const slackMeta = s.metadata?.slack as
-          | { channelId?: string; threadTs?: string; workspaceId?: string; eventKind?: string; publicationId?: string }
-          | undefined;
-        if (slackMeta && (slackMeta.channelId || slackMeta.threadTs)) setSlack(slackMeta);
       })
       .catch(() => {});
 
@@ -645,18 +647,6 @@ export function SessionDetail() {
       }
     })();
 
-    // Lazy-fetch the Trajectory envelope so the header chips have the
-    // outcome + reward to show. Decoupled from session/events fetches —
-    // trajectory builds on-demand off the events log, so a 5xx here is
-    // independent of session metadata loading. We do this once per
-    // session id and let the user reopen the page to refresh. Live
-    // sessions intentionally don't poll: trajectory.outcome === "running"
-    // is fine, the StatusPill already shows the live status.
-    setTrajectory("loading");
-    api<Trajectory>(`/v1/oma/sessions/${id}/trajectory`)
-      .then((t) => setTrajectory(t))
-      .catch(() => setTrajectory("error"));
-
     // Threads list (primary + sub-agent). Primary is always present
     // (seeded by SessionDO on /init). Filter to non-primary so the
     // selector only renders when there's something to switch between
@@ -673,39 +663,6 @@ export function SessionDetail() {
         setThreads(subThreads);
       })
       .catch(() => setThreads([]));
-
-    // Initial pending queue snapshot. The SSE bridge picks up live
-    // changes from system.user_message_{pending,promoted,cancelled}
-    // frames; this fetch seeds the map so a page-reload during an
-    // in-flight queue still shows the outbox correctly. Best-effort —
-    // a 404/5xx leaves pendingByEventId empty (the SSE will repopulate
-    // when the next pending event lands).
-    api<{
-      data: Array<{
-        pending_seq: number;
-        enqueued_at: number;
-        type: string;
-        event_id: string;
-        session_thread_id: string;
-        cancelled_at: number | null;
-        data: Event;
-      }>;
-    }>(`/v1/oma/sessions/${id}/pending`)
-      .then((res) => {
-        const next = new Map<string, PendingEntry>();
-        for (const r of res.data ?? []) {
-          if (!r.event_id) continue;
-          next.set(r.event_id, {
-            event_id: r.event_id,
-            pending_seq: r.pending_seq,
-            enqueued_at: r.enqueued_at,
-            session_thread_id: r.session_thread_id,
-            event: r.data,
-          });
-        }
-        if (next.size > 0) setPendingByEventId(next);
-      })
-      .catch(() => {/* leave empty */});
 
     return () => { abort.abort(); };
   }, [id]);

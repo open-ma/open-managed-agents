@@ -14,7 +14,6 @@ const agent = {
   version: 2,
   created_at: "2026-08-31T10:00:00.000Z",
   updated_at: "2026-08-31T11:00:00.000Z",
-  _oma: { harness: "default" },
 };
 
 vi.mock("../lib/useApiQuery", () => ({
@@ -59,7 +58,6 @@ describe("AgentDetail Linear rail", () => {
     const rail = screen.getByTestId("detail-rail");
     expect(within(rail).getByText("ID")).toBeInTheDocument();
     expect(within(rail).getByText("test-model")).toBeInTheDocument();
-    expect(within(rail).getByText("default")).toBeInTheDocument();
 
     const body = screen.getByTestId("detail-body");
     expect(within(body).getByRole("heading", { name: "Integrations" })).toBeInTheDocument();

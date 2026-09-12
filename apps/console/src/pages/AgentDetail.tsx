@@ -9,7 +9,7 @@ import { Page } from "../components/Page";
 import { PageHeader } from "../components/PageHeader";
 import { Button } from "@/components/ui/button";
 import type { ModelCard } from "@open-managed-agents/api-types";
-import type { AgentRecord as Agent, OmaAgentExtension } from "../types/agent";
+import type { AgentRecord as Agent } from "../types/agent";
 import { AgentFormDialog } from "./agents/AgentFormDialog";
 import { useI18n } from "../i18n";
 
@@ -22,23 +22,6 @@ interface Pub {
   persona: { name: string; avatarUrl: string | null };
   workspace_name: string | null;
 }
-
-type Runtime = {
-  id: string;
-  hostname: string;
-  status: string;
-  agents: Array<{ id: string }>;
-  local_skills?: Record<
-    string,
-    Array<{
-      id: string;
-      name?: string;
-      description?: string;
-      source?: string;
-      source_label?: string;
-    }>
-  >;
-};
 
 export function AgentDetail() {
   const { id } = useParams();
@@ -54,7 +37,6 @@ export function AgentDetail() {
     Array<{ id: string; name: string; description: string }>
   >([]);
   const [modelCards, setModelCards] = useState<ModelCard[]>([]);
-  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
 
   // Single-resource fetches via TQ. `enabled: !!id` defers until the route
   // param is available; the publication queries inherit the same gate.
@@ -64,11 +46,6 @@ export function AgentDetail() {
   const enabled = !!id;
   const { data: managedAgent, error: agentError } = useApiQuery<Agent>(
     id ? `/v1/agents/${id}` : null,
-    undefined,
-    { enabled },
-  );
-  const { data: omaAgentExtension } = useApiQuery<OmaAgentExtension>(
-    id ? `/v1/oma/agents/${id}` : null,
     undefined,
     { enabled },
   );
@@ -131,10 +108,6 @@ export function AgentDetail() {
           const mc = await api<{ data: ModelCard[] }>("/v1/oma/model_cards?limit=200");
           if (!cancelled) setModelCards(mc.data ?? []);
         })().catch((e) => console.warn("[AgentDetail] /v1/oma/model_cards aux fetch failed", e)),
-        (async () => {
-          const rt = await api<{ runtimes: Runtime[] }>("/v1/oma/runtimes");
-          if (!cancelled) setRuntimes(rt.runtimes ?? []);
-        })().catch((e) => console.warn("[AgentDetail] /v1/oma/runtimes aux fetch failed", e)),
       ]);
     })();
     return () => {
@@ -142,18 +115,7 @@ export function AgentDetail() {
     };
   }, [api]);
 
-  const agent = useMemo(
-    () => managedAgent
-      ? {
-          ...managedAgent,
-          ...(omaAgentExtension?._oma ? { _oma: omaAgentExtension._oma } : {}),
-          ...(omaAgentExtension?.enable_general_subagent !== undefined
-            ? { enable_general_subagent: omaAgentExtension.enable_general_subagent }
-            : {}),
-        }
-      : undefined,
-    [managedAgent, omaAgentExtension],
-  );
+  const agent = managedAgent;
   const versions = versionsRes?.data ?? [];
   // Filter to live publications only — same predicate the old useEffect ran.
   const linearPubs = useMemo(
@@ -221,16 +183,6 @@ export function AgentDetail() {
           <dl className="console-property-list">
             <PropertyRow label="ID"><span className="font-mono">{agent.id}</span></PropertyRow>
             <PropertyRow label="Model">{modelStr(agent.model)}</PropertyRow>
-            <PropertyRow label="Harness">{agent._oma?.harness || "default"}</PropertyRow>
-            {agent._oma?.runtime_binding && (
-              <PropertyRow label="Local Runtime">
-                <span className="font-mono">
-                  {agent._oma.runtime_binding.runtime_id.slice(0, 8)}…
-                </span>
-                <span className="text-fg-subtle"> · ACP agent: </span>
-                <span className="font-mono">{agent._oma.runtime_binding.acp_agent_id}</span>
-              </PropertyRow>
-            )}
             <PropertyRow label="Version">v{agent.version}</PropertyRow>
             <PropertyRow label="Tools">
               {(agent.tools || [])
@@ -343,7 +295,6 @@ export function AgentDetail() {
         allAgents={allAgents}
         customSkills={customSkills}
         modelCards={modelCards}
-        runtimes={runtimes}
       />
     </Page>
   );
