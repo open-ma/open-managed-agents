@@ -138,13 +138,14 @@ describe("Node POST /v1/oma/sessions/:id/files (promoteSandboxFile)", () => {
     }
     const session = (await sRes.json()) as { id: string };
 
-    // 3. Write through the sandbox API at the canonical workspace path.
-    //    Never assume that a provider shares the host process cwd.
+    // 3. The test-only adapter launches commands with the logical workspace
+    //    as cwd. Use a relative command path here; the API contract below
+    //    still promotes the provider-neutral `/workspace/greeting.txt` path.
     const writeRes = await fetch(`${omaBase}/sessions/${session.id}/exec`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        command: "mkdir -p /workspace && printf 'hello-from-sandbox' > /workspace/greeting.txt",
+        command: "printf 'hello-from-sandbox' > greeting.txt",
         timeout_ms: 30_000,
       }),
     });

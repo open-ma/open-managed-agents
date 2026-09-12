@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   SANDBOX_PROVIDER_PATHS,
+  resolveSandboxProviderForEnvironment,
   resolveSandboxProviderModule,
 } from "../src/sandbox-provider";
 
@@ -41,6 +42,21 @@ describe("main-node sandbox provider selection", () => {
 
   it("does not expose subprocess as a production provider", () => {
     expect(SANDBOX_PROVIDER_PATHS).not.toHaveProperty("subprocess");
+  });
+
+  it("allows the deterministic local adapter only through the test-only selector", () => {
+    expect(resolveSandboxProviderForEnvironment({
+      NODE_ENV: "test",
+      OPENMA_TEST_SANDBOX_PROVIDER: "local-subprocess",
+    })).toEqual({
+      provider: "test-local-subprocess",
+      modulePath: "@open-managed-agents/sandbox/adapters/local-subprocess",
+    });
+    expect(() => resolveSandboxProviderForEnvironment({
+      NODE_ENV: "production",
+      OPENMA_TEST_SANDBOX_PROVIDER: "local-subprocess",
+      SANDBOX_PROVIDER: "litebox",
+    })).toThrow(/test-only/i);
   });
 
   it("lists the isolated providers when selection is invalid", () => {

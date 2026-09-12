@@ -201,6 +201,12 @@ describe("Harbor-style ACP sandbox agent preparation", () => {
       await releaseAcpSandboxAgentState(sandbox, plan, "replace");
       await expect(access(plan.binding.nativePath, constants.F_OK))
         .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(dirname(plan.binding.nativePath), constants.F_OK))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(
+        dirname(dirname(dirname(plan.binding.nativePath))),
+        constants.F_OK,
+      )).rejects.toMatchObject({ code: "ENOENT" });
       await expect(access(
         sandboxPath(`${plan.binding.checkpointNativePath}/sessions/2026/09/07/rollout.jsonl`),
         constants.F_OK,
@@ -306,7 +312,7 @@ describe("Harbor-style ACP sandbox agent preparation", () => {
     await expect(hasRequiredAcpSandboxAgentState(sandbox, plan)).resolves.toBe(false);
     await releaseAcpSandboxAgentState(sandbox, plan, "shutdown");
     expect(commands).toHaveLength(2);
-    expect(commands.at(-1)).toContain(plan.binding.nativePath);
+    expect(commands.at(-1)).toContain(dirname(plan.binding.nativePath));
     await releaseAcpSandboxAgentState(sandbox, plan, "destroy");
     expect(commands.at(-1)).toContain("rm -rf --");
     expect(commands.at(-1)).toContain("session_claude/claude-code/v1");

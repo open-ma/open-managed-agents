@@ -342,7 +342,7 @@ import {
   resolveNodeProcessMode,
   validateNodeProcessEnvironment,
 } from "./process-mode.js";
-import { resolveSandboxProviderModule } from "./sandbox-provider.js";
+import { resolveSandboxProviderForEnvironment } from "./sandbox-provider.js";
 
 registerCoreHarnesses();
 
@@ -350,7 +350,7 @@ const processMode = resolveNodeProcessMode(process.env);
 validateNodeProcessEnvironment(process.env);
 const ownsLongLivedProcesses = processMode === "standalone";
 const standaloneSandboxProvider = ownsLongLivedProcesses
-  ? resolveSandboxProviderModule(process.env.SANDBOX_PROVIDER)
+  ? resolveSandboxProviderForEnvironment(process.env)
   : null;
 
 const toMarkdownProvider = nodeToMarkdown();
@@ -768,7 +768,7 @@ async function buildSandbox(
   workdir: string,
 ): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
   const selection = standaloneSandboxProvider
-    ?? resolveSandboxProviderModule(process.env.SANDBOX_PROVIDER);
+    ?? resolveSandboxProviderForEnvironment(process.env);
   const mod = (await import(selection.modulePath)) as {
     sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
   };

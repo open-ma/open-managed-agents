@@ -4,9 +4,10 @@ import { afterAll } from "vitest";
 
 const OWNED_PREFIXES = ["oma-", "openma-"] as const;
 
-// Process-level tests spawn the real production entry. Exercise its isolated
-// local provider rather than relying on the removed host-subprocess fallback.
-process.env.SANDBOX_PROVIDER ??= "litebox";
+// Process-level route tests need a deterministic sandbox without booting a VM
+// in the generic unit-test lane. The production selector never exposes this
+// adapter; live provider certification owns LiteBox and the other runtimes.
+process.env.OPENMA_TEST_SANDBOX_PROVIDER ??= "local-subprocess";
 
 async function ownedEntries(): Promise<Set<string>> {
   return new Set(

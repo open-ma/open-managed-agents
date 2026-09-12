@@ -304,8 +304,24 @@ export async function releaseAcpSandboxAgentState(
   preparation: AcpSandboxAgentPreparation,
   reason: AcpSandboxAgentReleaseReason,
 ): Promise<void> {
+  // Remove the complete per-session runtime namespace, not only its native/
+  // child. Real sandboxes discard /tmp with the runtime; host-backed local
+  // adapters share the OS temp directory and would otherwise accumulate an
+  // empty openma-harness-state tree across every session.
+  const runtimeRoot = posixDirname(preparation.binding.nativePath);
+  const adapterRoot = posixDirname(runtimeRoot);
+  const sessionRoot = posixDirname(adapterRoot);
+  const acpRoot = posixDirname(sessionRoot);
+  const scratchRoot = posixDirname(acpRoot);
   await sandbox.exec(
-    `rm -rf -- ${shellQuote(sandboxShellPath(preparation.binding.nativePath))}`,
+    `rm -rf -- ${shellQuote(sandboxShellPath(runtimeRoot))}; `
+      + `rmdir -- ${[
+        adapterRoot,
+        sessionRoot,
+        acpRoot,
+        scratchRoot,
+      ].map((path) => shellQuote(sandboxShellPath(path))).join(" ")} `
+      + "2>/dev/null || true",
   );
   if (reason !== "destroy") return;
   await sandbox.exec(
