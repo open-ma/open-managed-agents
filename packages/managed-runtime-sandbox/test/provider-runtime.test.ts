@@ -10,7 +10,10 @@ import type {
   SandboxRuntimePort,
 } from "@open-managed-agents/sandbox";
 
-import { createProviderManagedRuntime } from "../src/index";
+import {
+  createProviderManagedRuntime,
+  type ProviderManagedRuntimeProviderPort,
+} from "../src/index";
 import { createSandboxSessionMemoryFilePort } from "../src/provider-runtime";
 
 const scope = {
@@ -70,7 +73,10 @@ function runtime(id: string): Runtime {
       kind: "memory",
       scope: "portable",
     } satisfies SandboxCheckpointHandle)),
-    exec: vi.fn(async () => ""),
+    exec: vi.fn(async (command: string) =>
+      command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : ""),
     readFile: vi.fn(async () => ""),
     writeFile: vi.fn(async (path: string) => path),
     writeFileBytes: vi.fn(async (path: string) => path),
@@ -141,8 +147,25 @@ describe("sandbox Session Memory filesystem adapter", () => {
 });
 
 function composition(
-  provider: SandboxProviderPort<Runtime>,
+  provider: ProviderManagedRuntimeProviderPort<Runtime>,
   outputs?: { store: InMemoryBlobStore },
+  runtimeEnvironment: {
+    type: "base" | "custom";
+    identity: string;
+    artifact: { type: "preinstalled" };
+    prepare(input: {
+      runtime: Runtime;
+      scope: typeof scope;
+      fence: typeof fence;
+      plan: Parameters<ReturnType<typeof createProviderManagedRuntime>["sandbox"]["acquire"]>[0]["plan"];
+      signal: AbortSignal;
+    }): Promise<void>;
+  } = {
+    type: "base",
+    identity: "openma-base:test",
+    artifact: { type: "preinstalled" },
+    prepare: async () => {},
+  },
 ) {
   return createProviderManagedRuntime({
     providerName: "e2b",
@@ -163,6 +186,7 @@ function composition(
       retainedSuspendKind: "memory",
       portableCheckpointKind: "memory",
     },
+    runtimeEnvironment,
     ...(outputs === undefined ? {} : { outputs }),
     drivers: ["ama_worker"],
   });
@@ -180,6 +204,139 @@ async function freshBinding(runtimeComposition: ReturnType<typeof composition>) 
 }
 
 describe("provider managed runtime adapter", () => {
+  it.each(["base", "custom"] as const)(
+    "does not publish a %s Environment runtime before its artifact is prepared",
+    async (type) => {
+      const created = runtime(`environment-${type}`);
+      const lifecycle: string[] = [];
+      const create = vi.fn(async (_context, _environment, acquisition) => {
+        lifecycle.push("provider-create");
+        expect(acquisition?.environment).toEqual({
+          type,
+          identity: `${type}:sha256:test`,
+          artifact: { type: "preinstalled" },
+        });
+        return created;
+      });
+      vi.mocked(created.status).mockImplementation(async () => {
+        lifecycle.push("provider-ready");
+        return "running";
+      });
+      const prepare = vi.fn(async (input: { runtime: Runtime }) => {
+        lifecycle.push("environment-ready");
+        expect(input.runtime).toBe(created);
+      });
+      const composed = composition(
+        { create, resume: vi.fn(), restore: vi.fn() },
+        undefined,
+        {
+          type,
+          identity: `${type}:sha256:test`,
+          artifact: { type: "preinstalled" },
+          prepare,
+        } as never,
+      );
+      const workspace = await freshBinding(composed);
+
+      await expect(composed.sandbox.acquire({
+        scope,
+        fence,
+        plan: {
+          workspaceStrategy: "retained_runtime",
+          outputStrategy: null,
+          runtimeCheckpoint: null,
+          driver: { type: "ama_worker", process: { command: "worker" } },
+        },
+        workspace,
+        outputs: null,
+        signal: new AbortController().signal,
+      })).resolves.toMatchObject({ runtimeId: `environment-${type}` });
+
+      expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
+        runtime: created,
+        scope,
+        fence,
+        environment: {
+          type,
+          identity: `${type}:sha256:test`,
+          artifact: { type: "preinstalled" },
+        },
+      }));
+      expect(lifecycle).toEqual([
+        "provider-create",
+        "provider-ready",
+        "environment-ready",
+      ]);
+    },
+  );
+
+  it("destroys an allocation when Environment artifact preparation fails", async () => {
+    const created = runtime("environment-prepare-failed");
+    const composed = composition(
+      { create: vi.fn(async () => created), resume: vi.fn(), restore: vi.fn() },
+      undefined,
+      {
+        type: "custom",
+        identity: "custom:broken",
+        artifact: { type: "preinstalled" },
+        prepare: vi.fn(async () => {
+          throw new Error("runtime artifact digest mismatch");
+        }),
+      } as never,
+    );
+    const workspace = await freshBinding(composed);
+
+    await expect(composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("runtime artifact digest mismatch");
+    expect(created.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("always verifies the harness executable after a custom Environment bootstrap", async () => {
+    const created = runtime("environment-missing-harness");
+    vi.mocked(created.exec).mockResolvedValue("\n[exit 127]");
+    const prepare = vi.fn(async () => {});
+    const composed = composition(
+      { create: vi.fn(async () => created), resume: vi.fn(), restore: vi.fn() },
+      undefined,
+      {
+        type: "custom",
+        identity: "custom:without-harness",
+        artifact: { type: "preinstalled" },
+        prepare,
+      } as never,
+    );
+    const workspace = await freshBinding(composed);
+
+    await expect(composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "missing-worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal: new AbortController().signal,
+    })).rejects.toThrow(
+      "Runtime Environment custom:without-harness does not provide executable missing-worker",
+    );
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(created.destroy).toHaveBeenCalledOnce();
+  });
+
   it("materializes official file and repository resources through the attached provider runtime", async () => {
     const created = runtime("session-input-runtime");
     const composed = composition({
@@ -256,7 +413,11 @@ describe("provider managed runtime adapter", () => {
   it("hydrates materializer-owned memory stores for the supervised lane", async () => {
     const created = runtime("session-memory-runtime");
     created.exec = vi.fn(async (command: string) =>
-      command.startsWith("if [ -f") ? "0" : "");
+      command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : command.startsWith("if [ -f")
+          ? "0"
+          : "");
     const composed = composition({
       create: vi.fn(async () => created),
       resume: vi.fn(),
@@ -1046,12 +1207,18 @@ describe("provider managed runtime adapter", () => {
   it("publishes and resumes an opaque retained-runtime candidate", async () => {
     const first = runtime("sandbox-1");
     const resumed = runtime("sandbox-1");
+    const prepare = vi.fn(async () => {});
     const provider: SandboxProviderPort<Runtime> = {
       create: vi.fn(async () => first),
       resume: vi.fn(async () => resumed),
       restore: vi.fn(),
     };
-    const composed = composition(provider);
+    const composed = composition(provider, undefined, {
+      type: "custom",
+      identity: "custom:retained-runtime",
+      artifact: { type: "preinstalled" },
+      prepare,
+    } as never);
     const binding = await freshBinding(composed);
     const lease = await composed.sandbox.acquire({
       scope,
@@ -1116,6 +1283,23 @@ describe("provider managed runtime adapter", () => {
       }),
     );
     expect(provider.restore).not.toHaveBeenCalled();
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      runtime: first,
+      fence,
+    }));
+    expect(prepare).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      runtime: resumed,
+      fence: nextFence,
+    }));
+    expect(first.exec).toHaveBeenCalledWith(
+      expect.stringContaining("__OPENMA_RUNTIME_READY__"),
+      10_000,
+    );
+    expect(resumed.exec).toHaveBeenCalledWith(
+      expect.stringContaining("__OPENMA_RUNTIME_READY__"),
+      10_000,
+    );
   });
 
   it("rejects and cleans up a portable restore that never becomes runnable", async () => {

@@ -56,26 +56,20 @@ async function main() {
       {
         name: "minimax_tp",
         type: "stdio",
-        stdio: {
-          command: "uv",
-          args: [
-            "run",
-            "--no-project",
-            "--with",
-            "minimax-coding-plan-mcp",
-            "python",
-            "-c",
-            // Streamable HTTP transport, stateless mode — single POST endpoint,
-            // no session handshake needed (matches OMA's existing curl wiring).
-            "from minimax_mcp.server import mcp; mcp.settings.host='127.0.0.1'; mcp.settings.port=8765; mcp.settings.stateless_http=True; mcp.run(transport='streamable-http')",
-          ],
-          env: {
-            MINIMAX_API_KEY: MINIMAX_KEY!,
-            MINIMAX_API_HOST: MINIMAX_HOST,
-          },
-          port: 8765,
-          sse_path: "/mcp",
-          ready_timeout_ms: 120_000,
+        command: "/usr/bin/env",
+        args: [
+          "uv",
+          "run",
+          "--no-project",
+          "--with",
+          "minimax-coding-plan-mcp",
+          "python",
+          "-c",
+          "from minimax_mcp.server import mcp; mcp.run(transport='stdio')",
+        ],
+        env: {
+          MINIMAX_API_KEY: MINIMAX_KEY!,
+          MINIMAX_API_HOST: MINIMAX_HOST,
         },
       },
     ],

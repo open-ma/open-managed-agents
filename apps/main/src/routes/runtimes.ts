@@ -686,7 +686,7 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
   // setSpawnEnv) so we don't echo the PAT back to it through this call.
   const serverBase = new URL(c.req.url).origin;
   const mcp_servers = (agent.mcp_servers ?? [])
-    .filter((s) => !!s.url || (s.type !== "stdio" && s.type !== "stdio_proxy"))
+    .filter((s) => s.type !== "stdio")
     .map((s) => ({
       type: "http" as const,
       name: s.name,

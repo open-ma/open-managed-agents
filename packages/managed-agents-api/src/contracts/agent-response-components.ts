@@ -5,15 +5,9 @@ import type {
   BetaManagedAgentsAnthropicSkill,
   BetaManagedAgentsCustomSkill,
   BetaManagedAgentsCustomTool,
-  BetaManagedAgentsMCPServerURLDefinition,
   BetaManagedAgentsMCPToolset,
   BetaManagedAgentsModelConfig,
-  BetaManagedAgentsSessionThreadAgent,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
-import type {
-  BetaManagedAgentsSessionAgent,
-  BetaManagedAgentsSessionMultiagentCoordinator,
-} from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
 import { z } from "zod";
 
 const permissionPolicySchema = z.discriminatedUnion("type", [
@@ -132,12 +126,24 @@ export const agentToolResponseSchema = z.union([
 ]);
 
 export const agentMcpServerResponseSchema = z
-  .object({
-    name: z.string(),
-    type: z.literal("url"),
-    url: z.string(),
-  })
-  .strict() satisfies z.ZodType<BetaManagedAgentsMCPServerURLDefinition>;
+  .discriminatedUnion("type", [
+    z
+      .object({
+        name: z.string(),
+        type: z.literal("url"),
+        url: z.string(),
+      })
+      .strict(),
+    z
+      .object({
+        name: z.string(),
+        type: z.literal("stdio"),
+        command: z.string().startsWith("/"),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string(), z.string()).optional(),
+      })
+      .strict(),
+  ]);
 
 export const agentModelResponseSchema = z
   .object({
@@ -248,7 +254,7 @@ export const sessionThreadAgentResponseSchema = z
     type: z.literal("agent"),
     version: z.number().int(),
   })
-  .strict() satisfies z.ZodType<BetaManagedAgentsSessionThreadAgent>;
+  .strict();
 
 export const sessionAgentMultiagentResponseSchema = z
   .object({
@@ -257,10 +263,9 @@ export const sessionAgentMultiagentResponseSchema = z
     ),
     type: z.literal("coordinator"),
   })
-  .strict() satisfies z.ZodType<BetaManagedAgentsSessionMultiagentCoordinator>;
+  .strict();
 
-export const sessionAgentResponseSchema: z.ZodType<BetaManagedAgentsSessionAgent> =
-  z
+export const sessionAgentResponseSchema = z
     .object({
       id: z.string().min(1),
       description: z.string().nullable(),

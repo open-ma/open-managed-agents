@@ -88,22 +88,25 @@ type ToolDefinition =
 ### MCP server config
 
 ```ts
-interface McpServerConfig {
-  name: string;                 // becomes the prefix: mcp__<name>__<tool>
-  type: 'url' | 'stdio';
-  url?: string;                 // required by host-side OpenMA harnesses
-  authorization_token?: string; // inline bearer (otherwise: matched vault credential)
-  stdio?: {
-    command: string;
-    args?: string[];
-    env?: Record<string, string>;
-    port: number;               // 127.0.0.1:port the spawned process binds to
-    ready_timeout_ms?: number;  // default 60_000
-  };
-}
+type McpServerConfig =
+  | {
+      name: string;                 // becomes the prefix: mcp__<name>__<tool>
+      type: 'url';
+      url: string;
+      authorization_token?: string; // inline bearer (otherwise: matched vault credential)
+    }
+  | {
+      name: string;
+      type: 'stdio';
+      command: string;              // executable path supplied by the Environment
+      args?: string[];
+      env?: Record<string, string>; // enters the sandbox; do not put standing credentials here
+    };
 ```
 
-`stdio` is an adapter-owned declaration. It works only when an external Worker or a harness running inside the sandbox owns the child process and transport. The built-in Node and Cloudflare host-side harnesses require `url` and reject stdio-only declarations, because sandbox-local `127.0.0.1` is not automatically reachable from the control plane. URL MCP discovery is bounded at 15 s per server; up to 20 servers per agent.
+`stdio` is the standard MCP/ACP process transport; there is no port or SSE path. It works when an external Worker or a harness running inside the sandbox owns the child process. Harness-out-of-sandbox runtimes reject it explicitly because they cannot own a process inside the sandbox. URL MCP discovery is bounded at 15 s per server; up to 20 servers per agent.
+
+The Agent declaration is launch configuration, not installation configuration. The selected Environment must provide the executable and all of its runtime dependencies at the declared path, through its package configuration or custom image. Every OpenMA-managed base Environment includes Node.js/npm (and therefore `npx`) plus the uv toolchain (`uv`/`uvx`); provider adapters must launch the corresponding OpenMA image, template, or snapshot without changing that contract. OpenMA does not infer or install dependencies from `command`. Additional executables belong in the Environment package list or image. BYO images and external Workers are outside the base-image guarantee and must declare and supply their own runtime contents.
 
 ## Environment
 

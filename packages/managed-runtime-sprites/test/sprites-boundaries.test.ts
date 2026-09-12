@@ -115,11 +115,37 @@ function acquisition(signal = new AbortController().signal) {
       driver: { type: "ama_worker" as const, process: { command: "worker" } },
     },
     workspace: { bindingId: "workspace", mountPath: "/workspace" as const },
-    outputs: null, credentialEgress: null, signal,
+    outputs: null,
+    credentialEgress: null,
+    environment: {
+      type: "base" as const,
+      identity: "sprites:preinstalled",
+      artifact: { type: "preinstalled" as const },
+    },
+    signal,
   };
 }
 
 describe("Sprites provider boundary contracts", () => {
+  it("rejects image carriers instead of pretending Sprites can launch OCI images", async () => {
+    const value = sprite();
+    const sprites = client(value);
+    const provider = createSpritesProvider({ client: sprites });
+    await expect(provider.create(
+      { sessionId: scope.sessionId, workdir: "/workspace" },
+      {},
+      {
+        ...acquisition(),
+        environment: {
+          type: "custom",
+          identity: "unsupported-image",
+          artifact: { type: "image", reference: "registry.example/openma:custom" },
+        },
+      },
+    )).rejects.toThrow("sprites cannot launch Environment artifact image");
+    expect(sprites.createSprite).not.toHaveBeenCalled();
+  });
+
   it("adapts the official SDK constructor and environment options", async () => {
     spritesFixtureCalls.length = 0;
     const provider = createSpritesProvider({ token: "token", baseURL: "https://sprites", timeoutMs: 123 });

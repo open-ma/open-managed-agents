@@ -30,7 +30,10 @@ class FakeSandbox implements CloudflareManagedRuntimeSandbox {
   readonly suspend = this.checkpoint;
   readonly resume = vi.fn(async () => {});
   readonly destroy = vi.fn(async () => {});
-  readonly exec = vi.fn(async () => "");
+  readonly exec = vi.fn(async (command: string) =>
+    command.includes("__OPENMA_RUNTIME_READY__")
+      ? "__OPENMA_RUNTIME_READY__"
+      : "");
   readonly readFile = vi.fn(async () => "");
   readonly readFileBytes = vi.fn(async () => new Uint8Array());
   readonly writeFile = vi.fn(async (path: string) => path);
@@ -45,6 +48,40 @@ class FakeSandbox implements CloudflareManagedRuntimeSandbox {
 const env = { MAIN_DB: {}, SANDBOX: {} } as unknown as Env;
 
 describe("isolated Cloudflare managed runtime package", () => {
+  it("rejects image carriers because the Worker binding owns the preinstalled runtime", async () => {
+    const createSandbox = vi.fn(() => new FakeSandbox());
+    const runtime = createCloudflareManagedRuntime(env, {
+      createSandbox,
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "unsupported-image",
+        artifact: { type: "image", reference: "registry.example/openma:custom" },
+        prepare: async () => {},
+      },
+    });
+    const scope = { workspaceId: "workspace", environmentId: "environment", sessionId: "session", workId: "work" };
+    const fence = { ...scope, ownerId: "owner", generation: 1, token: "token", expiresAt: "2026-09-07T12:00:00.000Z" };
+    const signal = new AbortController().signal;
+    const workspace = await runtime.workspace.materialize({
+      scope, fence, strategy: "checkpoint_restore", activeCheckpoint: null,
+      idempotencyKey: "environment", signal,
+    });
+    await expect(runtime.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    })).rejects.toThrow("cloudflare cannot launch Environment artifact image");
+    expect(createSandbox).not.toHaveBeenCalled();
+  });
+
   it("preinstalls provider-runtime Session file/repository staging", async () => {
     const driver = createCloudflareManagedRuntimeDriver(env, {
       createSandbox: () => new FakeSandbox(),

@@ -40,7 +40,14 @@ class FakeSandbox implements SuperserveSandboxSdkPort {
     readText: vi.fn(async () => "content"),
   };
   readonly commands = {
-    run: vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0, truncated: false })),
+    run: vi.fn(async (command: string) => ({
+      stdout: command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : "",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    })),
     spawn: vi.fn(async (_command: string, options?: {
       onStdout?: (data: string) => void;
       onStderr?: (data: string) => void;
@@ -85,6 +92,12 @@ describe("Superserve managed runtime provider", () => {
       leaseTtlMs: 90_000,
       outputStore: null,
       fromTemplate: "openma-worker",
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "custom-superserve-template",
+        artifact: { type: "template", reference: "openma-worker-v2" },
+        prepare: async () => {},
+      },
     });
     const signal = new AbortController().signal;
     const workspace = await runtime.workspace.materialize({
@@ -111,7 +124,7 @@ describe("Superserve managed runtime provider", () => {
 
     expect(client.create).toHaveBeenCalledWith(expect.objectContaining({
       name: expect.stringMatching(/^oma-[a-f0-9]{32}$/),
-      fromTemplate: "openma-worker",
+      fromTemplate: "openma-worker-v2",
       metadata: expect.objectContaining({ openma: "managed" }),
       network: {
         allowOut: ["*.superserve.ai"],

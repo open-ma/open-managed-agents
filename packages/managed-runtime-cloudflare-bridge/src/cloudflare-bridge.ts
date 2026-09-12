@@ -17,8 +17,12 @@ import type {
 } from "@open-managed-agents/sandbox";
 
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
+  type ProviderManagedRuntimeProviderPort,
   type ProviderManagedRuntimeOptions,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 
 const providerName = "cloudflare-sandbox-bridge";
@@ -48,6 +52,7 @@ export interface CloudflareBridgeManagedRuntimeOptions
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   readiness?: ProviderManagedRuntimeOptions<CloudflareBridgeRuntime>["readiness"];
+  runtimeEnvironment?: ProviderRuntimeEnvironment<CloudflareBridgeRuntime>;
   /** Operator-owned staging for official Session file/repository/memory inputs. */
   sessionInputs?: SessionInputMaterializerPort;
 }
@@ -584,7 +589,33 @@ export function createCloudflareBridgeProvider(
 export function createCloudflareBridgeManagedRuntime(
   options: CloudflareBridgeManagedRuntimeOptions,
 ) {
-  const provider = createCloudflareBridgeProvider(options);
+  const bridgeProvider = createCloudflareBridgeProvider(options);
+  const provider: ProviderManagedRuntimeProviderPort<CloudflareBridgeRuntime> = {
+    create: (context, environment, acquisition) => {
+      if (acquisition === undefined) {
+        throw new Error("Cloudflare Bridge managed allocation requires acquisition context");
+      }
+      requireRuntimeEnvironmentArtifact(
+        acquisition.environment,
+        providerName,
+        ["preinstalled", "bootstrap"],
+      );
+      return bridgeProvider.create(context, environment);
+    },
+    resume: (handle, context, environment) =>
+      bridgeProvider.resume(handle, context, environment),
+    restore: (checkpoint, context, environment, acquisition) => {
+      if (acquisition === undefined) {
+        throw new Error("Cloudflare Bridge managed restore requires acquisition context");
+      }
+      requireRuntimeEnvironmentArtifact(
+        acquisition.environment,
+        providerName,
+        ["preinstalled", "bootstrap"],
+      );
+      return bridgeProvider.restore(checkpoint, context, environment);
+    },
+  };
   return createProviderManagedRuntime({
     providerName,
     provider,
@@ -593,6 +624,11 @@ export function createCloudflareBridgeManagedRuntime(
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: "cloudflare-bridge:preinstalled",
+      }),
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {

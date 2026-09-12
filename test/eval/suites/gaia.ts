@@ -80,24 +80,20 @@ function buildMiniMaxMcpServer() {
   return {
     name: "minimax_tp",
     type: "stdio",
-    stdio: {
-      command: "uv",
-      args: [
-        "run",
-        "--no-project",
-        "--with",
-        "minimax-coding-plan-mcp",
-        "python",
-        "-c",
-        "from minimax_mcp.server import mcp; mcp.settings.host='127.0.0.1'; mcp.settings.port=8765; mcp.settings.stateless_http=True; mcp.run(transport='streamable-http')",
-      ],
-      env: {
-        MINIMAX_API_KEY: apiKey || "",
-        MINIMAX_API_HOST: apiHost,
-      },
-      port: 8765,
-      sse_path: "/mcp",
-      ready_timeout_ms: 120_000,
+    command: "/usr/bin/env",
+    args: [
+      "uv",
+      "run",
+      "--no-project",
+      "--with",
+      "minimax-coding-plan-mcp",
+      "python",
+      "-c",
+      "from minimax_mcp.server import mcp; mcp.run(transport='stdio')",
+    ],
+    env: {
+      MINIMAX_API_KEY: apiKey || "",
+      MINIMAX_API_HOST: apiHost,
     },
   };
 }

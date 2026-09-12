@@ -350,4 +350,35 @@ test.describe("Agent config editor lossless browser contract", () => {
       before.tools[2],
     ]);
   });
+
+  test("creates a standard stdio MCP server without an HTTP adapter shape", async ({ page }) => {
+    const fixture = await installConsoleFixture(page);
+
+    await page.goto(`/agents/${AGENT_ID}`);
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit Agent" });
+    await dialog.getByRole("tab", { name: /^MCP Servers/ }).click();
+    await dialog.getByRole("button", { name: "+ Custom server" }).click();
+    await dialog.locator("#mcp-name-1").fill("workspace");
+    await dialog.locator("#mcp-type-1").click();
+    await page.getByRole("option", { name: "stdio" }).click();
+    await dialog.locator("#mcp-command-1").fill("/usr/local/bin/workspace-mcp");
+    await dialog.locator("#mcp-args-1").fill('["--root","/workspace"]');
+    await dialog.locator("#mcp-env-1").fill('{"LOG_LEVEL":"info"}');
+    await dialog.getByRole("button", { name: "Save changes" }).click();
+    await expect.poll(() => fixture.updates.length).toBe(1);
+
+    expect(fixture.updates[0].mcp_servers).toEqual([
+      { name: "docs", type: "url", url: "https://docs.example.test/mcp" },
+      {
+        name: "workspace",
+        type: "stdio",
+        command: "/usr/local/bin/workspace-mcp",
+        args: ["--root", "/workspace"],
+        env: { LOG_LEVEL: "info" },
+      },
+    ]);
+    expect(fixture.updates[0].mcp_servers[1]).not.toHaveProperty("url");
+    expect(fixture.updates[0].mcp_servers[1]).not.toHaveProperty("stdio");
+  });
 });

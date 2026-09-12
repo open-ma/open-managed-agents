@@ -11,14 +11,18 @@ import type {
   SandboxDuplexProcessPort,
   SandboxDuplexProcessSpec,
   SandboxPort,
-  SandboxProviderPort,
   SandboxRuntimePort,
   SandboxRuntimeStatus,
 } from "@open-managed-agents/sandbox";
 
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
+  type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
+  type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 
 const providerName = "daytona";
@@ -103,6 +107,7 @@ export interface DaytonaManagedRuntimeOptions {
   target?: string;
   snapshot?: string;
   image?: string;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<DaytonaRuntime>;
   autoStopInterval?: number;
   autoPauseInterval?: number;
   autoArchiveInterval?: number;
@@ -219,14 +224,28 @@ function creationParameters(
   name: string,
   labels: Record<string, string>,
   checkpoint?: SandboxCheckpointHandle,
+  environment?: ProviderManagedRuntimeAcquisitionContext["environment"],
 ): Readonly<Record<string, unknown>> {
+  const artifact = checkpoint === undefined && environment !== undefined
+    ? requireRuntimeEnvironmentArtifact(environment, providerName, ["image", "snapshot"])
+    : undefined;
   return {
     name,
     ...(checkpoint !== undefined
       ? { snapshot: checkpoint.checkpointId }
-      : options.snapshot !== undefined
-        ? { snapshot: options.snapshot }
-        : { image: options.image ?? "node:22-slim" }),
+      : artifact?.type === "snapshot"
+        ? { snapshot: artifact.reference }
+        : artifact?.type === "image"
+          ? { image: artifact.reference }
+          : options.snapshot !== undefined
+            ? { snapshot: options.snapshot }
+            : options.image !== undefined
+              ? { image: options.image }
+              : (() => {
+                  throw new Error(
+                    "Daytona managed runtime requires an Environment image or snapshot",
+                  );
+                })()),
     labels,
     ...(options.autoStopInterval === undefined
       ? {}
@@ -500,6 +519,7 @@ async function managedSandbox(
   options: DaytonaManagedRuntimeOptions,
   environmentId: string,
   sessionId: string,
+  acquisition?: ProviderManagedRuntimeAcquisitionContext,
 ): Promise<DaytonaRuntime> {
   const name = sandboxName(sessionId);
   let sandbox: DaytonaSandboxSdkPort;
@@ -510,7 +530,13 @@ async function managedSandbox(
     if (!isNotFound(error)) throw error;
     try {
       sandbox = await client.create(
-        creationParameters(options, name, expectedLabels(environmentId, sessionId)),
+        creationParameters(
+          options,
+          name,
+          expectedLabels(environmentId, sessionId),
+          undefined,
+          acquisition?.environment,
+        ),
         { timeout: 300 },
       );
     } catch (createError) {
@@ -527,10 +553,16 @@ export function createDaytonaProvider(
   client: DaytonaClientPort,
   options: DaytonaManagedRuntimeOptions,
   environmentId: string,
-): SandboxProviderPort<DaytonaRuntime> {
+): ProviderManagedRuntimeProviderPort<DaytonaRuntime> {
   return {
-    create: async (context) =>
-      managedSandbox(client, options, environmentId, context.sessionId),
+    create: async (context, _environment, acquisition) =>
+      managedSandbox(
+        client,
+        options,
+        environmentId,
+        context.sessionId,
+        acquisition,
+      ),
     resume: async (handle, context) => {
       if (handle.provider !== providerName || handle.runtimeId === "") {
         throw new Error("Daytona provider received an incompatible runtime handle");
@@ -577,6 +609,23 @@ export async function createDaytonaManagedRuntime(
   options: DaytonaManagedRuntimeOptions & { environmentId: string },
 ) {
   const client = options.client ?? await loadDaytonaClient(options);
+  const runtimeEnvironment = options.runtimeEnvironment
+    ?? (options.snapshot !== undefined
+      ? createPreinstalledRuntimeEnvironment<DaytonaRuntime>({
+          type: "base",
+          identity: options.snapshot,
+          artifact: { type: "snapshot", reference: options.snapshot },
+        })
+      : options.image !== undefined
+        ? createPreinstalledRuntimeEnvironment<DaytonaRuntime>({
+            type: "base",
+            identity: options.image,
+            artifact: { type: "image", reference: options.image },
+          })
+        : undefined);
+  if (runtimeEnvironment === undefined) {
+    throw new Error("Daytona managed runtime requires an Environment image or snapshot");
+  }
   return createProviderManagedRuntime({
     providerName,
     provider: createDaytonaProvider(client, options, options.environmentId),
@@ -585,6 +634,7 @@ export async function createDaytonaManagedRuntime(
       workdir: "/workspace",
     }),
     environment: () => ({}),
+    runtimeEnvironment,
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {

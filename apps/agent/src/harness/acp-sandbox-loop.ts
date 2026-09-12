@@ -143,14 +143,14 @@ export class AcpSandboxHarness implements HarnessInterface {
         });
         const managedMcpProxy = ctx.env.mcpProxy
           ?? managedMcpProxyFromWorkEnvironment(ctx.env);
-        const mcpServers = managedMcpProxy === null
-          ? []
-          : projectAcpSandboxMcpServers({
-              sessionId: ctx.session_id,
-              gatewayBaseUrl: managedMcpProxy.gatewayBaseUrl,
-              sessionsToken: managedMcpProxy.sessionsToken,
-              servers: ctx.agent.mcp_servers ?? [],
-            });
+        const mcpServers = projectAcpSandboxMcpServers({
+          sessionId: ctx.session_id,
+          ...(managedMcpProxy === null ? {} : {
+            gatewayBaseUrl: managedMcpProxy.gatewayBaseUrl,
+            sessionsToken: managedMcpProxy.sessionsToken,
+          }),
+          servers: ctx.agent.mcp_servers ?? [],
+        });
         this.#session = await acpRuntime.start({
           agent: preparation.launch,
           restart: config.restart

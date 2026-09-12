@@ -464,9 +464,11 @@ OMA registers any [Model Context Protocol](https://modelcontextprotocol.io) serv
 | Transport | When to use | How |
 |---|---|---|
 | HTTP / SSE | Hosted MCP servers (Linear, GitHub Copilot, Notion, …) | `{"type":"url","url":"https://mcp.linear.app/mcp"}` |
-| stdio | npm / PyPI MCP packages with no hosted endpoint | `{"type":"stdio","command":"uvx","args":[...],"port":8765}` — OMA spawns inside the sandbox container, talks to `127.0.0.1:port/sse` |
+| stdio | MCP processes already installed in the selected Environment | `{"type":"stdio","command":"/opt/mcp/bin/server","args":[...]}` — the sandbox Agent launches it and speaks MCP directly over stdin/stdout |
 
-Credentials never enter the sandbox; the outbound resolver matches by host and injects at forward time.
+URL-server credentials never enter the sandbox; the outbound resolver matches by host and injects at forward time. Values placed in a stdio server's `env` do enter the sandbox, so use only scoped values and never copy standing control-plane credentials there.
+
+The Environment, not the Agent declaration, owns stdio dependencies. Every OpenMA-managed base Environment ships Node.js/npm (`npx`) and uv (`uvx`); embedded sandbox adapters must preserve that contract by launching the corresponding OpenMA image, template, or snapshot. Additional tools belong in the Environment configuration. Only BYO images and external Workers are responsible for supplying the complete runtime themselves. OpenMA does not infer or install packages from `command`; a missing executable fails MCP startup visibly.
 
 | Auth mode | Configured as | Refresh |
 |---|---|---|

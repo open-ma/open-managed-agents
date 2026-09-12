@@ -1118,6 +1118,14 @@ export async function buildTools(
     env?.environmentConfig?.networking?.type === "limited"
     && env.environmentConfig.networking.allow_mcp_servers !== true;
   if (agentConfig.mcp_servers?.length && !mcpDisabledByEnvironment) {
+    const stdioServer = agentConfig.mcp_servers.find(
+      (server) => server.type === "stdio",
+    );
+    if (stdioServer) {
+      throw new Error(
+        `Standard MCP stdio server "${stdioServer.name}" requires a harness-in-sandbox runtime`,
+      );
+    }
     if (!env?.mcpBinding || !env?.tenantId || !env?.sessionId) {
       throw new Error(
         "Declared MCP servers require mcpBinding, tenantId, and sessionId",
@@ -1127,11 +1135,7 @@ export async function buildTools(
       const tenantId = env.tenantId;
       const sessionId = env.sessionId;
       for (const server of agentConfig.mcp_servers) {
-        if (!server.url) {
-          throw new Error(
-            `Declared MCP server "${server.name}" has no prepared URL`,
-          );
-        }
+        if (server.type === "stdio") continue;
         const serverName = server.name;
         // Custom fetch the protocol client calls for every MCP request. We stamp
         // routing metadata and hand the Request to main; main does the

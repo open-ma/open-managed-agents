@@ -183,7 +183,16 @@ describe("preinstalled Node managed ACP supervisor", () => {
             id: "agent_managed_1",
             version: 9,
             model: { id: "deepseek-chat", speed: "fast", effort: "low" },
-            mcp_servers: [{ type: "url", name: "github", url: "https://upstream.invalid" }],
+            mcp_servers: [
+              { type: "url", name: "github", url: "https://upstream.invalid" },
+              {
+                type: "stdio",
+                name: "workspace",
+                command: "/usr/local/bin/workspace-mcp",
+                args: ["--root", "/workspace"],
+                env: { MODE: "read-write" },
+              },
+            ],
             skills: [{ type: "custom", skill_id: "skill_1", version: "4" }],
             system: "Inspect the repository before editing.",
             tools: [{ type: "custom", name: "deploy", description: "Deploy", input_schema: { type: "object" } }],
@@ -292,6 +301,11 @@ describe("preinstalled Node managed ACP supervisor", () => {
         name: "github",
         url: `https://gateway.openma.test/v1/oma/mcp-proxy/${scope.sessionId}/github`,
         headers: [{ name: "Authorization", value: "Bearer scoped-session-token" }],
+      }, {
+        name: "workspace",
+        command: "/usr/local/bin/workspace-mcp",
+        args: ["--root", "/workspace"],
+        env: [{ name: "MODE", value: "read-write" }],
       }],
       sessionRequestMeta: {
         openma: {
@@ -633,7 +647,7 @@ describe("preinstalled Node managed ACP supervisor", () => {
     [agentSnapshot({ system: undefined }), "agent.system"],
     [agentSnapshot({ mcp_servers: null }), "agent.mcp_servers"],
     [agentSnapshot({ mcp_servers: [null] }), "agent.mcp_servers[0]"],
-    [agentSnapshot({ mcp_servers: [{ type: "stdio", name: "x", url: "https://x" }] }), "agent.mcp_servers[0]"],
+    [agentSnapshot({ mcp_servers: [{ type: "stdio", name: "x", command: "relative-command" }] }), "agent.mcp_servers[0]"],
     [agentSnapshot({ mcp_servers: [{ type: "url", name: "", url: "https://x" }] }), "agent.mcp_servers[0]"],
     [agentSnapshot({ mcp_servers: [{ type: "url", name: "x", url: "" }] }), "agent.mcp_servers[0]"],
     [agentSnapshot({ skills: null }), "agent.skills"],

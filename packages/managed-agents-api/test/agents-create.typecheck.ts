@@ -12,8 +12,8 @@ type Equal<Left, Right> =
     : false;
 
 const agentCreateBodyMatchesOfficialContract: Equal<
-  Omit<AgentCreateBody, "_oma">,
-  OfficialAgentCreateBody
+  Omit<AgentCreateBody, "_oma" | "mcp_servers">,
+  Omit<OfficialAgentCreateBody, "mcp_servers">
 > = true;
 
 void agentCreateBodyMatchesOfficialContract;

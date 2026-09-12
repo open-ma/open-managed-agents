@@ -75,6 +75,37 @@ describe("sandbox ACP runtime", () => {
     expect(sandboxResult).toEqual(localResult);
   });
 
+  it("sends the standard MCP stdio transport unchanged in session/new", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "oma-acp-mcp-stdio-"));
+    temporaryDirectories.push(workdir);
+    const runtime = createAcpRuntime({
+      type: "sandbox",
+      sandbox: new LocalSubprocessSandbox({ workdir }),
+    });
+    const mcpServers = [{
+      name: "workspace",
+      command: "/usr/local/bin/workspace-mcp",
+      args: ["--root", "/workspace"],
+      env: [{ name: "LOG_LEVEL", value: "info" }],
+    }];
+    const session = await runtime.start({
+      agent: {
+        command: process.execPath,
+        args: ["-e", fakeAcpAgentSource],
+        cwd: "/workspace",
+      },
+      mcpServers,
+    });
+
+    const events: unknown[] = [];
+    for await (const event of session.prompt("report mcp")) events.push(event);
+    expect(events).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: JSON.stringify(mcpServers) },
+    });
+    await session.dispose();
+  });
+
   it("reports a placement session dead when its ACP child exits unexpectedly", async () => {
     const workdir = await mkdtemp(join(tmpdir(), "oma-acp-liveness-"));
     temporaryDirectories.push(workdir);
@@ -210,6 +241,7 @@ const fakeAcpAgentSource = String.raw`
 const readline = require("node:readline");
 const input = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+let mcpServers = [];
 input.on("line", (line) => {
   const request = JSON.parse(line);
   const result = (value) => send({ jsonrpc: "2.0", id: request.id, result: value });
@@ -218,6 +250,7 @@ input.on("line", (line) => {
       result({ protocolVersion: 1, agentCapabilities: {} });
       break;
     case "session/new":
+      mcpServers = request.params.mcpServers;
       result({ sessionId: "sandbox-acp-session" });
       break;
     case "session/prompt": {
@@ -229,7 +262,10 @@ input.on("line", (line) => {
           sessionId: request.params.sessionId,
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "sandbox:" + text },
+            content: {
+              type: "text",
+              text: text === "report mcp" ? JSON.stringify(mcpServers) : "sandbox:" + text,
+            },
           },
         },
       });

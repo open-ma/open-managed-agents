@@ -5,7 +5,6 @@ import {
 import type {
   SandboxFactoryContext,
   SandboxFactoryEnv,
-  SandboxProviderPort,
 } from "@open-managed-agents/sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -16,8 +15,12 @@ import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import { S3BlobStore } from "@open-managed-agents/blob-store/adapters/s3";
 
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
+  type ProviderManagedRuntimeProviderPort,
   type ProviderManagedRuntimeOptions,
+  type ProviderRuntimeEnvironmentResolver,
 } from "@open-managed-agents/managed-runtime-sandbox";
 
 export interface E2BManagedRuntimeOptions {
@@ -27,7 +30,8 @@ export interface E2BManagedRuntimeOptions {
   leaseTtlMs: number;
   context?: (scope: RuntimeResourceScope) => SandboxFactoryContext;
   /** Test/custom-compatible-service seam; defaults to the official E2B adapter. */
-  provider?: SandboxProviderPort<E2BSandboxExecutor>;
+  provider?: ProviderManagedRuntimeProviderPort<E2BSandboxExecutor>;
+  runtimeEnvironment?: ProviderRuntimeEnvironmentResolver<E2BSandboxExecutor>;
   /** Explicit output target, useful with per-scope environment functions. */
   outputStore?: BlobStore | null;
   /**
@@ -73,9 +77,46 @@ export function createE2BManagedRuntime(options: E2BManagedRuntimeOptions) {
       ?? (typeof configuredEnvironment === "function"
         ? null
         : filesStoreFromEnvironment(configuredEnvironment));
+  const runtimeEnvironment = options.runtimeEnvironment
+    ?? ((input: { environment: SandboxFactoryEnv }) => {
+      const reference = input.environment.SANDBOX_IMAGE?.trim();
+      if (!reference) {
+        throw new Error(
+          "E2B managed runtime requires an Environment template; SDK base fallback is disabled",
+        );
+      }
+      return createPreinstalledRuntimeEnvironment<E2BSandboxExecutor>({
+        type: "base",
+        identity: reference,
+        artifact: { type: "template", reference },
+      });
+    });
+  const selectedProvider = options.provider ?? sandboxProvider;
+  const withEnvironment = (
+    env: SandboxFactoryEnv,
+    acquisition: Parameters<ProviderManagedRuntimeProviderPort<E2BSandboxExecutor>["create"]>[2],
+  ) => {
+    if (acquisition === undefined) {
+      throw new Error("E2B managed allocation requires acquisition context");
+    }
+    const artifact = requireRuntimeEnvironmentArtifact(
+      acquisition.environment,
+      "e2b",
+      ["template"],
+    );
+    return { ...env, SANDBOX_IMAGE: artifact.reference };
+  };
+  const provider: ProviderManagedRuntimeProviderPort<E2BSandboxExecutor> = {
+    create: (context, env, acquisition) =>
+      selectedProvider.create(context, withEnvironment(env, acquisition), acquisition),
+    resume: (handle, context, env, acquisition) =>
+      selectedProvider.resume(handle, context, withEnvironment(env, acquisition), acquisition),
+    restore: (checkpoint, context, env, acquisition) =>
+      selectedProvider.restore(checkpoint, context, withEnvironment(env, acquisition), acquisition),
+  };
   return createProviderManagedRuntime({
     providerName: "e2b",
-    provider: options.provider ?? sandboxProvider,
+    provider,
     context:
       options.context
       ?? ((scope) => ({
@@ -83,6 +124,7 @@ export function createE2BManagedRuntime(options: E2BManagedRuntimeOptions) {
         workdir: "/workspace",
       })),
     environment,
+    runtimeEnvironment,
     leaseTtlMs: options.leaseTtlMs,
     sandboxCapabilities: {
       suspendResume: "supported",

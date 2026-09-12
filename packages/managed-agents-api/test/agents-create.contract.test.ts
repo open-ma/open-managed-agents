@@ -149,6 +149,13 @@ describe("Managed Agents API — POST /v1/agents", () => {
         model: "claude-opus-5",
         mcp_servers: [
           { type: "url", name: "docs", url: "https://mcp.example.test" },
+          {
+            type: "stdio",
+            name: "workspace",
+            command: "/usr/local/bin/workspace-mcp",
+            args: ["--root", "/workspace"],
+            env: { LOG_LEVEL: "info" },
+          },
         ],
         multiagent: {
           type: "coordinator",
@@ -190,6 +197,13 @@ describe("Managed Agents API — POST /v1/agents", () => {
         model: "claude-opus-5",
         mcpServers: [
           { type: "url", name: "docs", url: "https://mcp.example.test" },
+          {
+            type: "stdio",
+            name: "workspace",
+            command: "/usr/local/bin/workspace-mcp",
+            args: ["--root", "/workspace"],
+            env: { LOG_LEVEL: "info" },
+          },
         ],
         multiagent: {
           type: "coordinator",
@@ -582,6 +596,38 @@ describe("Managed Agents API — POST /v1/agents", () => {
         model: "claude-opus-5",
         mcp_servers: [{ name: "missing-url", type: "url" }],
         tools: [{}],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(createCalls).toEqual([]);
+  });
+
+  it("rejects a relative stdio executable before persistence", async () => {
+    const createCalls: unknown[] = [];
+    const api = buildAgentsTestApi(
+      makeAgentsPort({
+        createAgent: async (input) => {
+          createCalls.push(input);
+          return { type: "created", agent: agentView };
+        },
+      }),
+    );
+
+    const response = await api.request("/v1/agents", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "managed-agents-2026-04-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Coding Assistant",
+        model: "claude-opus-5",
+        mcp_servers: [{
+          name: "workspace",
+          type: "stdio",
+          command: "workspace-mcp",
+        }],
       }),
     });
 

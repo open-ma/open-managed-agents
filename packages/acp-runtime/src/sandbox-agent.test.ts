@@ -47,7 +47,13 @@ describe("Harbor-style ACP sandbox agent preparation", () => {
       sessionsToken: "sk-ant-req-v1.current-work",
       servers: [
         { name: "linear/main", type: "url", url: "https://linear.example/mcp" },
-        { name: "local", type: "stdio" },
+        {
+          name: "local",
+          type: "stdio",
+          command: "/usr/local/bin/local-mcp",
+          args: ["--workspace", "/workspace"],
+          env: { LOG_LEVEL: "info" },
+        },
       ],
     })).toEqual([
       {
@@ -59,7 +65,30 @@ describe("Harbor-style ACP sandbox agent preparation", () => {
           value: "Bearer sk-ant-req-v1.current-work",
         }],
       },
+      {
+        name: "local",
+        command: "/usr/local/bin/local-mcp",
+        args: ["--workspace", "/workspace"],
+        env: [{ name: "LOG_LEVEL", value: "info" }],
+      },
     ]);
+  });
+
+  it("projects a standard stdio server without requiring an HTTP gateway", () => {
+    expect(projectAcpSandboxMcpServers({
+      sessionId: "session_01",
+      servers: [{
+        name: "local",
+        type: "stdio",
+        command: "/usr/local/bin/local-mcp",
+        args: ["--workspace", "/workspace"],
+      }],
+    })).toEqual([{
+      name: "local",
+      command: "/usr/local/bin/local-mcp",
+      args: ["--workspace", "/workspace"],
+      env: [],
+    }]);
   });
 
   it("rejects a non-HTTP gateway and never falls back to the upstream MCP URL", () => {

@@ -43,7 +43,10 @@ class FakeDaytonaSandbox {
   readonly process = {
     executeCommand: async (command: string) => {
       this.commands.push(command);
-      return { exitCode: 0, result: "", artifacts: { stdout: "", stderr: "" } };
+      const stdout = command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : "";
+      return { exitCode: 0, result: stdout, artifacts: { stdout, stderr: "" } };
     },
     createSession: async () => undefined,
     executeSessionCommand: async (_sessionId: string, input: { command: string }) => {
@@ -278,6 +281,7 @@ describe("Daytona managed runtime provider package", () => {
     client.sandboxes.set(foreign.id, foreign);
     const driver = daytonaRuntime.createDaytonaManagedRuntimeDriver({
       client,
+      image: "openma-base",
       leaseTtlMs: 90_000,
     });
 
@@ -309,6 +313,7 @@ describe("Daytona managed runtime provider package", () => {
     };
     const driver = daytonaRuntime.createDaytonaManagedRuntimeDriver({
       client,
+      image: "openma-base",
       leaseTtlMs: 90_000,
     });
 

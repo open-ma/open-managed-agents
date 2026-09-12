@@ -7,7 +7,13 @@ import {
   SupervisedSandboxHarnessDriver,
   type ManagedEnvironmentWorkerOptions,
 } from "@open-managed-agents/managed-runtime-host";
-import { createProviderManagedRuntime } from "@open-managed-agents/managed-runtime-sandbox";
+import {
+  createPreinstalledRuntimeEnvironment,
+  createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
+  type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
+} from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
   RuntimeCheckpointPort,
@@ -57,6 +63,7 @@ export interface CloudflareManagedRuntimeOptions {
   createSandbox(env: Env, runtimeId: string): CloudflareManagedRuntimeSandbox;
   /** API origin reachable from the container for scoped Work/MCP traffic. */
   controlPlaneBaseUrl?: string;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<CloudflareManagedRuntimeSandbox>;
 }
 
 export interface CloudflareManagedRuntimeHostOptions
@@ -115,13 +122,44 @@ export function createCloudflareManagedRuntime(
       && env.R2_SECRET_ACCESS_KEY,
   );
   const instantiate = options.createSandbox;
-  const provider = createCloudflareSandboxProvider(env, instantiate);
+  const sandboxProvider = createCloudflareSandboxProvider(env, instantiate);
+  const provider: ProviderManagedRuntimeProviderPort<CloudflareManagedRuntimeSandbox> = {
+    create: (context, factoryEnvironment, acquisition) => {
+      if (acquisition === undefined) {
+        throw new Error("Cloudflare managed allocation requires acquisition context");
+      }
+      requireRuntimeEnvironmentArtifact(
+        acquisition.environment,
+        "cloudflare",
+        ["preinstalled", "bootstrap"],
+      );
+      return sandboxProvider.create(context, factoryEnvironment);
+    },
+    resume: (handle, context, factoryEnvironment) =>
+      sandboxProvider.resume(handle, context, factoryEnvironment),
+    restore: (checkpoint, context, factoryEnvironment, acquisition) => {
+      if (acquisition === undefined) {
+        throw new Error("Cloudflare managed restore requires acquisition context");
+      }
+      requireRuntimeEnvironmentArtifact(
+        acquisition.environment,
+        "cloudflare",
+        ["preinstalled", "bootstrap"],
+      );
+      return sandboxProvider.restore(checkpoint, context, factoryEnvironment);
+    },
+  };
 
   return createProviderManagedRuntime<CloudflareManagedRuntimeSandbox>({
     providerName: "cloudflare",
     provider,
     context: (scope) => ({ sessionId: scope.sessionId, workdir: "/workspace" }),
     environment: () => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: "cloudflare:preinstalled",
+      }),
     leaseTtlMs: options.leaseTtlMs ?? 90_000,
     sandboxCapabilities: {
       suspendResume: "unsupported",

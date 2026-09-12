@@ -27,7 +27,10 @@ function providerRuntime() {
     suspend: async () => ({ provider: "e2b", checkpointId: "runtime-1", sourceRuntimeId: "runtime-1", kind: "memory" as const, scope: "runtime" as const }),
     resume: async () => {},
     checkpoint: async () => ({ provider: "e2b", checkpointId: "snapshot", sourceRuntimeId: "runtime-1", kind: "memory" as const, scope: "portable" as const }),
-    exec: async () => "",
+    exec: async (command: string) =>
+      command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : "",
     startProcess: async () => null,
     setEnvVars: async () => {},
     registerCommandSecrets: () => {},
@@ -40,6 +43,57 @@ function providerRuntime() {
 }
 
 describe("E2B managed runtime provider package", () => {
+  it("launches the resolved Environment template instead of the SDK base fallback", async () => {
+    const create = vi.fn(async () => providerRuntime());
+    const runtime = createE2BManagedRuntime({
+      environment: { E2B_API_KEY: "test-only", SANDBOX_IMAGE: "stale-template" },
+      provider: { create, resume: vi.fn(), restore: vi.fn() } as never,
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "custom-e2b-template",
+        artifact: { type: "template", reference: "openma-template-v2" },
+        prepare: async () => {},
+      },
+      leaseTtlMs: 90_000,
+      outputStore: null,
+    });
+    const signal = new AbortController().signal;
+    const workspace = await runtime.workspace.materialize({
+      scope,
+      fence,
+      strategy: "retained_runtime",
+      activeCheckpoint: null,
+      idempotencyKey: "environment-template",
+      signal,
+    });
+
+    await runtime.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ SANDBOX_IMAGE: "openma-template-v2" }),
+      expect.objectContaining({
+        environment: {
+          type: "custom",
+          identity: "custom-e2b-template",
+          artifact: { type: "template", reference: "openma-template-v2" },
+        },
+      }),
+    );
+  });
+
   it("projects the configured E2B implementation through the swappable provider driver Port", async () => {
     const createDriver = Reflect.get(e2bPreset, "createE2BManagedRuntimeDriver");
     expect(createDriver).toBeTypeOf("function");
@@ -179,7 +233,10 @@ describe("E2B managed runtime provider package", () => {
 
   it("executes functional environment/context seams through an injected provider", async () => {
     const create = vi.fn<(context: unknown, environment: unknown, acquisition: unknown) => Promise<ReturnType<typeof providerRuntime>>>(async () => providerRuntime());
-    const environment = vi.fn(() => ({ E2B_API_KEY: "scope-key" }));
+    const environment = vi.fn(() => ({
+      E2B_API_KEY: "scope-key",
+      SANDBOX_IMAGE: "openma-template",
+    }));
     const context = vi.fn(() => ({ sessionId: "custom-session", workdir: "/custom" }));
     const runtime = createE2BManagedRuntime({
       environment,
@@ -214,7 +271,7 @@ describe("E2B managed runtime provider package", () => {
     expect(context).toHaveBeenCalledWith(scope);
     expect(create).toHaveBeenCalledWith(
       { sessionId: "custom-session", workdir: "/custom" },
-      { E2B_API_KEY: "scope-key" },
+      { E2B_API_KEY: "scope-key", SANDBOX_IMAGE: "openma-template" },
       expect.objectContaining({ scope, fence }),
     );
   });
@@ -222,7 +279,7 @@ describe("E2B managed runtime provider package", () => {
   it("uses the default context during actual acquisition", async () => {
     const create = vi.fn<(context: unknown, environment: unknown, acquisition: unknown) => Promise<ReturnType<typeof providerRuntime>>>(async () => providerRuntime());
     const runtime = createE2BManagedRuntime({
-      environment: { E2B_API_KEY: "key" },
+      environment: { E2B_API_KEY: "key", SANDBOX_IMAGE: "openma-template" },
       provider: { create } as never,
       leaseTtlMs: 90_000,
       outputStore: null,

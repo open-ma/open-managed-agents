@@ -1,9 +1,12 @@
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
   type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
   type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -191,6 +194,7 @@ async function retryLifecycle<T>(
 
 export interface SpritesManagedRuntimeOptions extends SpritesProviderOptions {
   leaseTtlMs: number;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<SpritesRuntime>;
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   credentialEgress?: ProviderManagedRuntimeOptions<SpritesRuntime>["credentialEgress"];
@@ -712,6 +716,11 @@ function createProviderWithClient(
       if (acquisition === undefined) {
         throw new Error("Sprites managed allocation requires acquisition context");
       }
+      requireRuntimeEnvironmentArtifact(
+        acquisition.environment,
+        providerName,
+        ["preinstalled", "bootstrap"],
+      );
       acquisition.signal.throwIfAborted();
       const client = await resolveClient();
       const name = stableName(context.sessionId);
@@ -864,6 +873,11 @@ export async function createSpritesSandbox(
     workspace: { bindingId: `workspace-${labelHash(context.sessionId)}`, mountPath: "/workspace" },
     outputs: null,
     credentialEgress: null,
+    environment: {
+      type: "base",
+      identity: "sprites:preinstalled",
+      artifact: { type: "preinstalled" },
+    },
     signal: controller.signal,
   });
 }
@@ -882,6 +896,11 @@ export function createSpritesManagedRuntime(options: SpritesManagedRuntimeOption
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: "sprites:preinstalled",
+      }),
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {

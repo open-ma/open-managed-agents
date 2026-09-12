@@ -104,7 +104,8 @@ export function injectMcpServersIntoSnapshot(
       ...existingServers,
       ...servers.map((s) => ({
         name: s.name,
-        type: (s.type ?? "url") as "url" | "stdio" | "sse",
+        type: (s.type === "sse" || s.type === "http" ? s.type : "url") as
+          "url" | "http" | "sse",
         url: s.url,
       })),
     ],

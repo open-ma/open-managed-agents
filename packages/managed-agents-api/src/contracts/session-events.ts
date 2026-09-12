@@ -612,8 +612,7 @@ const sessionEventDeltaSchema = z
   })
   .strict();
 
-export const sessionStreamEventResponseSchema: z.ZodType<BetaManagedAgentsStreamSessionEvents> =
-  z.union([
+export const sessionStreamEventResponseSchema = z.union([
     sentEventSchema,
     sessionUsageEventSchema,
     historySessionEventSchema,

@@ -1,9 +1,12 @@
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
   type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
   type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -132,6 +135,7 @@ export interface ModalProviderOptions {
 
 export interface ModalManagedRuntimeOptions extends ModalProviderOptions {
   leaseTtlMs: number;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<ModalRuntime>;
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   credentialEgress?: ProviderManagedRuntimeOptions<ModalRuntime>["credentialEgress"];
@@ -498,7 +502,11 @@ async function acquireSandbox(
     try {
       sandbox = await sdk.create({
         appName: options.appName,
-        image: options.image,
+        image: requireRuntimeEnvironmentArtifact(
+          acquisition.environment,
+          providerName,
+          ["image"],
+        ).reference,
         name,
         tags,
         workspace: {
@@ -600,6 +608,12 @@ export function createModalManagedRuntime(options: ModalManagedRuntimeOptions) {
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: options.image,
+        artifact: { type: "image", reference: options.image },
+      }),
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {

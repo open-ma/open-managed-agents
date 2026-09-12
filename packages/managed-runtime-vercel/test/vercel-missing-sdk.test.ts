@@ -15,7 +15,14 @@ describe("Vercel optional SDK boundary", () => {
           driver: { type: "ama_worker", process: { command: "worker" } },
         },
         workspace: { bindingId: "workspace", mountPath: "/workspace" },
-        outputs: null, credentialEgress: null, signal: new AbortController().signal,
+        outputs: null,
+        credentialEgress: null,
+        environment: {
+          type: "base",
+          identity: "vercel:preinstalled",
+          artifact: { type: "preinstalled" },
+        },
+        signal: new AbortController().signal,
       },
     )).rejects.toThrow("requires '@vercel/sandbox'");
   });

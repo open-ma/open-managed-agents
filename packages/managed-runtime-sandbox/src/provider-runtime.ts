@@ -71,8 +71,56 @@ export interface ProviderManagedRuntimeAcquisitionContext {
   workspace: WorkspaceBinding;
   outputs: SessionOutputBinding | null;
   credentialEgress: Parameters<ManagedSandboxPort["acquire"]>[0]["credentialEgress"];
+  /** Provider-neutral Environment selection resolved before allocation. */
+  environment: ProviderRuntimeEnvironmentDescriptor;
   signal: AbortSignal;
 }
+
+/** The Environment's provider carrier. It is deliberately separate from the
+ * public Environment model: adapters translate the same resolved Environment
+ * into the carrier their provider understands. */
+export type ProviderRuntimeEnvironmentArtifact =
+  | { type: "preinstalled" }
+  | { type: "image"; reference: string }
+  | { type: "template"; reference: string }
+  | { type: "snapshot"; reference: string }
+  | { type: "bootstrap"; reference: string };
+
+export interface ProviderRuntimeEnvironmentDescriptor {
+  type: "base" | "custom";
+  /** Stable release, digest, template, snapshot, or bootstrap identity. */
+  identity: string;
+  artifact: ProviderRuntimeEnvironmentArtifact;
+}
+
+/**
+ * Runtime contents selected by an Environment. `base` is the versioned
+ * OpenMA runtime contract; `custom` is an operator/user supplied artifact
+ * which must prove the same executable contract before a lease is published.
+ *
+ * Provider image/template/snapshot selection happens before allocation. This
+ * hook owns the post-allocation half: idempotent bootstrap (when needed) and
+ * verification of the exact artifact/capabilities inside the live runtime.
+ */
+export interface ProviderRuntimeEnvironment<Runtime extends ProviderRuntime>
+  extends ProviderRuntimeEnvironmentDescriptor {
+  verificationTimeoutMs?: number;
+  prepare(input: {
+    runtime: Runtime;
+    scope: RuntimeResourceScope;
+    fence: RuntimeResourceFence;
+    plan: ManagedRuntimePlan;
+    environment: ProviderRuntimeEnvironmentDescriptor;
+    signal: AbortSignal;
+  }): Promise<void>;
+}
+
+export type ProviderRuntimeEnvironmentResolver<Runtime extends ProviderRuntime> =
+  | ProviderRuntimeEnvironment<Runtime>
+  | ((input: {
+      scope: RuntimeResourceScope;
+      environment: SandboxFactoryEnv;
+    }) => ProviderRuntimeEnvironment<Runtime>);
 
 /**
  * Provider SDK boundary used by the generic runtime composition. The optional
@@ -117,6 +165,9 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
     sessionId: string;
     workId: string;
   }): SandboxFactoryEnv;
+  /** Environment artifact/bootstrap barrier. When omitted, the shared base
+   * contract verifies the selected harness executable in-place. */
+  runtimeEnvironment?: ProviderRuntimeEnvironmentResolver<Runtime>;
   leaseTtlMs: number;
   /** Provider allocation is not runnable until this barrier passes. The host
    * fence is already renewing while this runs, so slow boots cannot publish a
@@ -207,6 +258,100 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
       environment: SandboxFactoryEnv;
     }): Promise<Runtime>;
   };
+}
+
+function planExecutable(plan: ManagedRuntimePlan): string {
+  return plan.driver.type === "openma_supervised"
+    ? plan.driver.supervisor.command
+    : plan.driver.process.command;
+}
+
+/** Default OpenMA base Environment: providers may choose any carrier, but it
+ * is not runnable until the requested harness executable is observable. */
+export function createPreinstalledRuntimeEnvironment<Runtime extends ProviderRuntime>(
+  input: {
+    type?: "base" | "custom";
+    identity: string;
+    artifact?: ProviderRuntimeEnvironmentArtifact;
+    timeoutMs?: number;
+  },
+): ProviderRuntimeEnvironment<Runtime> {
+  const type = input.type ?? "base";
+  const identity = input.identity.trim();
+  const timeoutMs = input.timeoutMs ?? 10_000;
+  if (identity.length === 0) {
+    throw new TypeError("Runtime Environment identity must not be empty");
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("Runtime Environment timeoutMs must be a positive integer");
+  }
+  return {
+    type,
+    identity,
+    artifact: input.artifact ?? { type: "preinstalled" },
+    verificationTimeoutMs: timeoutMs,
+    async prepare({ signal }) {
+      signal.throwIfAborted();
+    },
+  };
+}
+
+async function verifyRuntimeEnvironment(
+  runtime: ProviderRuntime,
+  plan: ManagedRuntimePlan,
+  environment: ProviderRuntimeEnvironmentDescriptor,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  const readyMarker = "__OPENMA_RUNTIME_READY__";
+  signal.throwIfAborted();
+  const executable = planExecutable(plan).trim();
+  if (executable.length === 0) {
+    throw new Error("Runtime Environment cannot verify an empty harness executable");
+  }
+  const predicate = executable.startsWith("/")
+    ? `test -x ${shellQuote(executable)}`
+    : `command -v ${shellQuote(executable)} >/dev/null 2>&1`;
+  const probe = `if ${predicate}; then printf '%s\\n' ${shellQuote(readyMarker)}; else exit 127; fi`;
+  try {
+    const output = await runtime.exec(probe, timeoutMs);
+    if (!output.split(/\r?\n/u).some((line) => line.trim() === readyMarker)) {
+      throw new Error("runtime readiness marker was not returned");
+    }
+  } catch (error) {
+    throw new Error(
+      `Runtime Environment ${environment.identity} does not provide executable ${executable}`,
+      { cause: error },
+    );
+  }
+  signal.throwIfAborted();
+}
+
+/** Extract a provider carrier only after checking that this adapter actually
+ * understands it. This is the common fail-closed boundary used by every
+ * managed provider implementation. */
+export function requireRuntimeEnvironmentArtifact<
+  Type extends ProviderRuntimeEnvironmentArtifact["type"],
+>(
+  environment: ProviderRuntimeEnvironmentDescriptor,
+  provider: string,
+  supported: readonly Type[],
+): Extract<ProviderRuntimeEnvironmentArtifact, { type: Type }> {
+  if (!(supported as readonly string[]).includes(environment.artifact.type)) {
+    throw new Error(
+      `${provider} cannot launch Environment artifact ${environment.artifact.type}`,
+    );
+  }
+  if (
+    environment.artifact.type !== "preinstalled"
+    && environment.artifact.reference.trim().length === 0
+  ) {
+    throw new Error(`${provider} Environment artifact reference must not be empty`);
+  }
+  return environment.artifact as Extract<
+    ProviderRuntimeEnvironmentArtifact,
+    { type: Type }
+  >;
 }
 
 export interface ProviderManagedRuntimeComposition {
@@ -605,6 +750,10 @@ async function* supervisorEvents(
 export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
   options: ProviderManagedRuntimeOptions<Runtime>,
 ): ProviderManagedRuntimeComposition {
+  const defaultRuntimeEnvironment = createPreinstalledRuntimeEnvironment<Runtime>({
+    type: "base",
+    identity: "openma-base",
+  });
   const readinessTimeoutMs = options.readiness?.timeoutMs ?? 60_000;
   const readinessPollIntervalMs = options.readiness?.pollIntervalMs ?? 250;
   const readinessWait = options.readiness?.wait ?? waitForAbortableDelay;
@@ -681,6 +830,9 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
       input.signal.throwIfAborted();
       const context = options.context(input.scope);
       const environment = options.environment(input.scope);
+      const runtimeEnvironment = typeof options.runtimeEnvironment === "function"
+        ? options.runtimeEnvironment({ scope: input.scope, environment })
+        : options.runtimeEnvironment ?? defaultRuntimeEnvironment;
       const egress = input.credentialEgress === null || input.credentialEgress === undefined
         ? undefined
         : requireEgressBinding(
@@ -699,6 +851,11 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
             workspace: input.workspace,
             outputs: input.outputs,
             credentialEgress: input.credentialEgress ?? null,
+            environment: {
+              type: runtimeEnvironment.type,
+              identity: runtimeEnvironment.identity,
+              artifact: runtimeEnvironment.artifact,
+            },
             signal: effectSignal,
           };
           return checkpoint === undefined
@@ -725,6 +882,33 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
               });
               yield* tryPortPromise((effectSignal) =>
                 waitUntilReady(runtime, effectSignal)
+              );
+              yield* tryPortPromise((effectSignal) =>
+                runtimeEnvironment.prepare({
+                  runtime,
+                  scope: input.scope,
+                  fence: input.fence,
+                  plan: input.plan,
+                  environment: {
+                    type: runtimeEnvironment.type,
+                    identity: runtimeEnvironment.identity,
+                    artifact: runtimeEnvironment.artifact,
+                  },
+                  signal: effectSignal,
+                })
+              );
+              yield* tryPortPromise((effectSignal) =>
+                verifyRuntimeEnvironment(
+                  runtime,
+                  input.plan,
+                  {
+                    type: runtimeEnvironment.type,
+                    identity: runtimeEnvironment.identity,
+                    artifact: runtimeEnvironment.artifact,
+                  },
+                  runtimeEnvironment.verificationTimeoutMs ?? 10_000,
+                  effectSignal,
+                )
               );
               return { runtime, lease };
             }).pipe(

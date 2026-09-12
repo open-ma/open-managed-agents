@@ -110,6 +110,11 @@ function acquisition(signal = new AbortController().signal) {
     workspace: { bindingId: "workspace", mountPath: "/workspace" as const },
     outputs: null,
     credentialEgress: null,
+    environment: {
+      type: "base" as const,
+      identity: "image",
+      artifact: { type: "image" as const, reference: "image" },
+    },
     signal,
   };
 }

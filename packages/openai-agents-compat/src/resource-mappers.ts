@@ -137,6 +137,7 @@ export function agentResource(agent: AgentView): ResourceObject {
     }
   }
   for (const server of agent.mcpServers) {
+    if (server.type !== "url") continue;
     const extra = extras[`mcp:${server.name}`] ?? {};
     const toolset = agent.tools.find(tool => tool.type === "mcp_toolset" && tool.mcpServerName === server.name);
     tools.set(`mcp:${server.name}`, resolvedTool({ type: "mcp", server_label: server.name, ...extra, transport: { type: "http", server_url: server.url, headers: extra.headers ?? {} }, allowed_tools: toolset?.type === "mcp_toolset" && !toolset.defaultConfig.enabled ? toolset.configs.filter(config => config.enabled).map(config => config.name) : null }));

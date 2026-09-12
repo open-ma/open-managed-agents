@@ -259,12 +259,29 @@ export function AgentFormDialog({
   };
 
   const addMcp = () =>
-    setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "url", url: "" }] });
+    setForm({
+      ...form,
+      mcpServers: [...form.mcpServers, {
+        name: "",
+        type: "url",
+        url: "",
+        command: "",
+        argsJson: "[]",
+        envJson: "{}",
+      }],
+    });
   const addMcpFromRegistry = (entry: { id: string; name: string; url: string }) => {
     if (form.mcpServers.some((m) => m.url === entry.url)) return;
     setForm({
       ...form,
-      mcpServers: [...form.mcpServers, { name: entry.id, type: "url", url: entry.url }],
+      mcpServers: [...form.mcpServers, {
+        name: entry.id,
+        type: "url",
+        url: entry.url,
+        command: "",
+        argsJson: "[]",
+        envJson: "{}",
+      }],
     });
   };
   const updateMcp = (i: number, field: keyof McpEntry, val: string) => {
@@ -311,7 +328,13 @@ export function AgentFormDialog({
         model: tmpl.model,
         system: tmpl.system,
         description: tmpl.description,
-        mcpServers: tmpl.mcpServers.map((m) => ({ ...m })),
+        mcpServers: tmpl.mcpServers.map((m) => ({
+          ...m,
+          type: "url" as const,
+          command: "",
+          argsJson: "[]",
+          envJson: "{}",
+        })),
         skills: tmpl.skills.map((s) => ({ ...s } as SkillEntry)),
       });
       setPreservedConfig(null);
@@ -729,7 +752,9 @@ export function AgentFormDialog({
       <McpServerPickerModal
         open={showMcpPicker}
         onClose={() => setShowMcpPicker(false)}
-        alreadyAddedUrls={form.mcpServers.map((m) => m.url)}
+        alreadyAddedUrls={form.mcpServers.flatMap((m) =>
+          m.type === "url" && m.url ? [m.url] : []
+        )}
         onPick={addMcpFromRegistry}
       />
     </>
@@ -1235,7 +1260,7 @@ function McpTab({
             onClick={addMcp}
             className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
-            + Custom URL
+            + Custom server
           </Button>
         </div>
       </div>
@@ -1255,8 +1280,18 @@ function McpTab({
               />
             </div>
             <div className="w-24">
-              <Label className="text-xs text-fg-muted block mb-0.5">Type</Label>
-              <div className={`${inputCls} flex items-center text-fg-muted`}>URL</div>
+              <Label htmlFor={`mcp-type-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                Type
+              </Label>
+              <Select
+                id={`mcp-type-${i}`}
+                value={mcp.type}
+                onValueChange={(value) => updateMcp(i, "type", value)}
+                className={inputCls}
+              >
+                <SelectOption value="url">URL</SelectOption>
+                <SelectOption value="stdio">stdio</SelectOption>
+              </Select>
             </div>
             <Button variant="ghost"
               onClick={() => removeMcp(i)}
@@ -1266,18 +1301,61 @@ function McpTab({
               ×
             </Button>
           </div>
-          <div>
-            <Label htmlFor={`mcp-url-${i}`} className="text-xs text-fg-muted block mb-0.5">
-              URL
-            </Label>
-            <Input
-              id={`mcp-url-${i}`}
-              value={mcp.url}
-              onChange={(e) => updateMcp(i, "url", e.target.value)}
-              className={inputCls}
-              placeholder="https://mcp.github.com/sse"
-            />
-          </div>
+          {mcp.type === "url" ? (
+            <div>
+              <Label htmlFor={`mcp-url-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                URL
+              </Label>
+              <Input
+                id={`mcp-url-${i}`}
+                value={mcp.url}
+                onChange={(e) => updateMcp(i, "url", e.target.value)}
+                className={inputCls}
+                placeholder="https://mcp.github.com/sse"
+              />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div>
+                <Label htmlFor={`mcp-command-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Command (absolute sandbox path)
+                </Label>
+                <Input
+                  id={`mcp-command-${i}`}
+                  value={mcp.command}
+                  onChange={(e) => updateMcp(i, "command", e.target.value)}
+                  className={inputCls}
+                  placeholder="/usr/local/bin/my-mcp-server"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <Label htmlFor={`mcp-args-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                    Args (JSON array)
+                  </Label>
+                  <Input
+                    id={`mcp-args-${i}`}
+                    value={mcp.argsJson}
+                    onChange={(e) => updateMcp(i, "argsJson", e.target.value)}
+                    className={inputCls}
+                    placeholder='["--root", "/workspace"]'
+                  />
+                </div>
+                <div>
+                  <Label htmlFor={`mcp-env-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                    Non-secret env (JSON object)
+                  </Label>
+                  <Input
+                    id={`mcp-env-${i}`}
+                    value={mcp.envJson}
+                    onChange={(e) => updateMcp(i, "envJson", e.target.value)}
+                    className={inputCls}
+                    placeholder='{"LOG_LEVEL":"info"}'
+                  />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       ))}
       {form.mcpServers.length === 0 && (

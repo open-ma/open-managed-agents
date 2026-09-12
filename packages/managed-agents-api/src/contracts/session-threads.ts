@@ -1,7 +1,4 @@
-import type {
-  BetaManagedAgentsSessionThread,
-  ThreadListParams,
-} from "@anthropic-ai/sdk/resources/beta/sessions/threads/threads";
+import type { ThreadListParams } from "@anthropic-ai/sdk/resources/beta/sessions/threads/threads";
 import { z } from "zod";
 import {
   advisorResponseSchema,
@@ -31,8 +28,7 @@ const sessionThreadStatsSchema = z
   })
   .strict();
 
-export const sessionThreadResponseSchema: z.ZodType<BetaManagedAgentsSessionThread> =
-  z
+export const sessionThreadResponseSchema = z
     .object({
       id: z.string().min(1),
       agent: sessionThreadAgentSchema,

@@ -400,6 +400,30 @@ key.
 
 ## Provider capabilities
 
+The Runtime Host resolves one Environment artifact before provider allocation,
+then translates it at the provider adapter boundary. This is a deployment-side
+contract, not a second `Environment.config` or `Environment.metadata` shape.
+Every newly created, restored, or resumed runtime must finish its idempotent
+Environment preparation and prove that the selected harness executable exists
+before the lease is published. A provider or artifact mismatch fails before
+allocation; a failed post-allocation probe destroys the allocation.
+
+| Provider | Environment carrier accepted by its managed adapter |
+|---|---|
+| Node + Docker | explicit OCI image |
+| LiteBox / BoxRun, Blaxel, Modal | OCI image |
+| Daytona | OCI image or provider snapshot |
+| E2B / compatible | E2B template |
+| Superserve | template, snapshot, preinstalled runtime, or bootstrap |
+| Vercel | OCI image, snapshot, preinstalled runtime, or bootstrap |
+| Sprites | preinstalled runtime or bootstrap |
+| Cloudflare Sandbox / Bridge | preinstalled runtime or bootstrap; the Worker binding owns the underlying image |
+
+`base` and `custom` select who owns the artifact, not a different runtime
+protocol. A custom image/template/snapshot must satisfy the same executable
+probe as the versioned OpenMA base. Managed adapters never silently substitute
+their SDK's sample/default image when that Environment carrier is required.
+
 | Preset | Workspace | Outputs | Hard cleanup | Process-memory recovery |
 |---|---|---|---|---|
 | Node + Docker | portable filesystem checkpoint | filesystem final collector | Docker force remove | none |

@@ -3,7 +3,6 @@ import type {
   AgentListParams,
   AgentRetrieveParams,
   AgentUpdateParams,
-  BetaManagedAgentsAgent,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
 import type { VersionListParams } from "@anthropic-ai/sdk/resources/beta/agents/versions";
 import { z } from "zod";
@@ -50,6 +49,19 @@ export type OpenMaAgentModelConfigBody = AgentModelConfig & {
 
 export type OpenMaAgentModelBody = AgentModelName | OpenMaAgentModelConfigBody;
 
+export interface OpenMaStdioMcpServerBody {
+  name: string;
+  type: "stdio";
+  /** Absolute executable path inside the sandbox. */
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export type OpenMaMcpServerBody =
+  | NonNullable<OfficialAgentCreateBody["mcp_servers"]>[number]
+  | OpenMaStdioMcpServerBody;
+
 export interface OpenMaAgentAcpBody {
   agent: {
     id?: string;
@@ -82,12 +94,14 @@ export interface OpenMaAgentExtensionBody {
   enable_general_subagent?: boolean | null;
 }
 
-export type AgentCreateBody = Omit<OfficialAgentCreateBody, "model"> & {
+export type AgentCreateBody = Omit<OfficialAgentCreateBody, "model" | "mcp_servers"> & {
   model: OpenMaAgentModelBody;
+  mcp_servers?: OpenMaMcpServerBody[];
   _oma?: OpenMaAgentExtensionBody;
 };
-export type AgentUpdateBody = Omit<OfficialAgentUpdateBody, "model"> & {
+export type AgentUpdateBody = Omit<OfficialAgentUpdateBody, "model" | "mcp_servers"> & {
   model?: OpenMaAgentModelBody;
+  mcp_servers?: OpenMaMcpServerBody[] | null;
   _oma?: OpenMaAgentExtensionBody;
 };
 
@@ -229,7 +243,7 @@ export const agentUpdateBodySchema: z.ZodType<AgentUpdateBody> = z
   })
   .strict();
 
-export const agentResponseSchema: z.ZodType<BetaManagedAgentsAgent> = z
+export const agentResponseSchema = z
   .object({
     id: z.string().min(1),
     archived_at: z.string().nullable(),
