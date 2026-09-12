@@ -22,6 +22,9 @@ export interface PrepareNodeManagedSessionInputs {
   workspaceId: string;
   session: Session;
   sandbox: SandboxExecutor;
+  /** Stable identifier for this concrete sandbox incarnation. Writable
+   * Memory workspaces use it as an isolation/fencing boundary. */
+  runtimeGeneration?: string;
 }
 
 export interface NodeManagedSessionInputPreparerDependencies {
@@ -103,6 +106,9 @@ export class NodeManagedSessionInputPreparer {
       tenantId: input.workspaceId,
       sessionId: input.session.id,
     });
+    await input.sandbox.setEnvVars?.({
+      OMA_OUTPUTS_DIR: "/mnt/session/outputs",
+    });
 
     const memoryStores = input.session.resources.filter(
       (resource) => resource.type === "memory_store",
@@ -113,20 +119,34 @@ export class NodeManagedSessionInputPreparer {
       );
     }
     for (const resource of memoryStores) {
-      if (resource.access !== "read_only") {
+      const access = resource.access === "read_only" ? "read_only" : "read_write";
+      if (
+        access === "read_write" &&
+        input.runtimeGeneration === undefined
+      ) {
         throw new Error(
-          `Managed Node runtime does not support read-write Memory Store ${resource.memoryStoreId}; use read_only until reverse synchronization is configured`,
+          `Writable Managed Memory Store ${resource.memoryStoreId} requires a runtime generation`,
         );
       }
       const snapshot = await this.dependencies.memorySnapshots.materialize({
         workspaceId: input.workspaceId,
         sessionId: input.session.id,
         memoryStoreId: resource.memoryStoreId,
+        access,
+        ...(access === "read_write"
+          ? { runtimeGeneration: input.runtimeGeneration }
+          : {}),
       });
       await input.sandbox.mountMemoryStore!({
         storeName: resource.name ?? resource.memoryStoreId,
         storeId: snapshot.mountStoreId,
-        readOnly: true,
+        readOnly: access === "read_only",
+      });
+      const storeName = resource.name ?? resource.memoryStoreId;
+      await input.sandbox.setEnvVars?.({
+        OMA_MEMORY_DIR: "/mnt/memory",
+        [`OMA_MEMORY_${storeName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]:
+          `/mnt/memory/${storeName}`,
       });
     }
 

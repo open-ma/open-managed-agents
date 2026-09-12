@@ -101,6 +101,26 @@ export function allowsApiKeyRequest(
 const DEFAULT_BYPASS = (path: string) =>
   path === "/health" || path.startsWith("/auth/");
 
+function authenticationFailure(path: string, message: string) {
+  if (path.startsWith("/v1/") && !path.startsWith("/v1/oma/")) {
+    return {
+      type: "error" as const,
+      error: { type: "authentication_error" as const, message },
+    };
+  }
+  return { error: message };
+}
+
+function authorizationFailure(path: string, message: string) {
+  if (path.startsWith("/v1/") && !path.startsWith("/v1/oma/")) {
+    return {
+      type: "error" as const,
+      error: { type: "permission_error" as const, message },
+    };
+  }
+  return { error: message };
+}
+
 export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
   const bypassPath = deps.bypassPath ?? DEFAULT_BYPASS;
   return createMiddleware<{
@@ -130,9 +150,12 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     const apiKey = c.req.header("x-api-key");
     if (apiKey) {
       const r = await deps.resolveApiKey(apiKey);
-      if (!r) return c.json({ error: "Invalid API key" }, 401);
+      if (!r) return c.json(authenticationFailure(c.req.path, "Invalid API key"), 401);
       if (!allowsApiKeyRequest(r, { path: c.req.path, transport: "x-api-key" })) {
-        return c.json({ error: "API key is not authorized for this resource" }, 403);
+        return c.json(
+          authorizationFailure(c.req.path, "API key is not authorized for this resource"),
+          403,
+        );
       }
       c.set("tenant_id", r.tenantId);
       if (r.userId) c.set("user_id", r.userId);
@@ -155,9 +178,14 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
             path: c.req.path,
           });
       const resolved = scoped ?? await deps.resolveApiKey(token);
-      if (!resolved) return c.json({ error: "Invalid bearer token" }, 401);
+      if (!resolved) {
+        return c.json(authenticationFailure(c.req.path, "Invalid bearer token"), 401);
+      }
       if (!allowsApiKeyRequest(resolved, { path: c.req.path, transport: "bearer" })) {
-        return c.json({ error: "Bearer token is not authorized for this resource" }, 403);
+        return c.json(
+          authorizationFailure(c.req.path, "Bearer token is not authorized for this resource"),
+          403,
+        );
       }
       c.set("tenant_id", resolved.tenantId);
       if (resolved.userId) c.set("user_id", resolved.userId);
@@ -172,9 +200,9 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     try {
       session = await deps.resolveSession(c.req.raw.headers);
     } catch {
-      return c.json({ error: "Unauthorized" }, 401);
+      return c.json(authenticationFailure(c.req.path, "Unauthorized"), 401);
     }
-    if (!session) return c.json({ error: "Unauthorized" }, 401);
+    if (!session) return c.json(authenticationFailure(c.req.path, "Unauthorized"), 401);
 
     // 4. Tenant resolution.
     let tenantId: string | null = null;

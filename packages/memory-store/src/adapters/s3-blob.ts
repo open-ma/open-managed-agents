@@ -56,6 +56,10 @@ interface S3GetOutput {
 interface S3PutOutput {
   ETag?: string;
 }
+interface S3ListOutput {
+  Contents?: Array<{ Key?: string }>;
+  NextContinuationToken?: string;
+}
 interface S3CommandConstructor<I, O> {
   new (input: I): { resolveMiddleware?: unknown; output?: O };
 }
@@ -76,6 +80,7 @@ export class S3BlobStore implements BlobStore {
     GetObjectCommand: S3CommandConstructor<unknown, S3GetOutput>;
     PutObjectCommand: S3CommandConstructor<unknown, S3PutOutput>;
     DeleteObjectCommand: S3CommandConstructor<unknown, unknown>;
+    ListObjectsV2Command: S3CommandConstructor<unknown, S3ListOutput>;
   }> | null = null;
 
   constructor(private opts: S3BlobStoreOptions) {
@@ -94,6 +99,7 @@ export class S3BlobStore implements BlobStore {
           GetObjectCommand: S3CommandConstructor<unknown, S3GetOutput>;
           PutObjectCommand: S3CommandConstructor<unknown, S3PutOutput>;
           DeleteObjectCommand: S3CommandConstructor<unknown, unknown>;
+          ListObjectsV2Command: S3CommandConstructor<unknown, S3ListOutput>;
         };
         const client = new sdk.S3Client({
           endpoint: this.opts.endpoint,
@@ -110,6 +116,7 @@ export class S3BlobStore implements BlobStore {
           GetObjectCommand: sdk.GetObjectCommand,
           PutObjectCommand: sdk.PutObjectCommand,
           DeleteObjectCommand: sdk.DeleteObjectCommand,
+          ListObjectsV2Command: sdk.ListObjectsV2Command,
         };
       })();
     }
@@ -148,6 +155,25 @@ export class S3BlobStore implements BlobStore {
       if (isNotFound(err)) return null;
       throw err;
     }
+  }
+
+  async list(
+    prefix: string,
+    cursor?: string,
+  ): Promise<{ keys: string[]; nextCursor: string | null }> {
+    const { client, ListObjectsV2Command } = await this.ensureClient();
+    const result = await client.send(new ListObjectsV2Command({
+      Bucket: this.bucket,
+      Prefix: this.fullKey(prefix),
+      ...(cursor === undefined ? {} : { ContinuationToken: cursor }),
+    }));
+    return {
+      keys: (result.Contents ?? [])
+        .flatMap(({ Key }) => Key === undefined ? [] : [this.logicalKey(Key)])
+        .filter((key) => !key.endsWith(".meta.json"))
+        .sort(),
+      nextCursor: result.NextContinuationToken ?? null,
+    };
   }
 
   async put(
@@ -240,6 +266,12 @@ export class S3BlobStore implements BlobStore {
   fullKey(key: string): string {
     const stripped = key.replace(/^\/+/, "");
     return this.prefix ? `${this.prefix}${stripped}` : stripped;
+  }
+
+  private logicalKey(key: string): string {
+    return this.prefix && key.startsWith(this.prefix)
+      ? key.slice(this.prefix.length)
+      : key;
   }
 }
 

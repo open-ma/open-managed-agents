@@ -2,6 +2,7 @@ import type { AcpRuntime } from "@open-managed-agents/acp-runtime";
 import type { HarnessSupervisorHarness } from "@open-managed-agents/harness-supervisor";
 import {
   createManagedAgentsRuntime,
+  type ManagedAgentsSessionSteerCommand,
   type ManagedAgentsSessionPreparationPort,
 } from "@open-managed-agents/runtime";
 import type {
@@ -27,6 +28,7 @@ export type ManagedHarnessSessionStartCommand = SessionStartCommand & {
 
 export type ManagedHarnessControlMessage =
   | SessionCommand
+  | ManagedAgentsSessionSteerCommand
   | ManagedHarnessSessionStartCommand
   | {
       type: "control.complete";
@@ -135,6 +137,8 @@ export function createManagedAcpSupervisorHarness(
       const recoveryReasons = new Map<string, ManagedHarnessRecoveryReason>();
       let eventChain = Promise.resolve();
       let finalized = false;
+      let queuedPrompts = 0;
+      let promptTail = Promise.resolve();
 
       runtime.attach({
         publish(event) {
@@ -248,12 +252,31 @@ export function createManagedAcpSupervisorHarness(
                 recoveryReasons.delete(command.sessionId);
               }
             }
-            await runtime.dispatch(command);
-            await eventChain;
+            if (command.type === "session.prompt") {
+              // A prompt can run for minutes. Keep the control stream live so
+              // steer and cancel commands reach that same ACP session while
+              // the turn is in flight. True next-turn prompts remain ordered.
+              const dispatched = queuedPrompts === 0
+                ? runtime.dispatch(command)
+                : promptTail.then(() => runtime.dispatch(command));
+              queuedPrompts += 1;
+              promptTail = dispatched.finally(() => {
+                queuedPrompts -= 1;
+              });
+            } else {
+              if (command.type === "session.dispose") {
+                await promptTail;
+                await eventChain;
+              }
+              await runtime.dispatch(command);
+              await eventChain;
+            }
           }
           if (!cleanCompletion) {
             throw new Error("Harness control stream closed before control.complete");
           }
+          await promptTail;
+          await eventChain;
           return { exitCode: 0 };
         } catch (error) {
           if (controller.signal.aborted) return { exitCode: 0 };

@@ -138,15 +138,13 @@ describe("Node POST /v1/oma/sessions/:id/files (promoteSandboxFile)", () => {
     }
     const session = (await sRes.json()) as { id: string };
 
-    // 3. Write a file inside the sandbox via /exec. LocalSubprocess
-    //    has cwd = workdir, so a bare relative path lands in the workdir
-    //    which `readSandboxFile("/workspace/greeting.txt")` then resolves
-    //    via the harness's /workspace → workdir mapping.
+    // 3. Write through the sandbox API at the canonical workspace path.
+    //    Never assume that a provider shares the host process cwd.
     const writeRes = await fetch(`${omaBase}/sessions/${session.id}/exec`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        command: "printf 'hello-from-sandbox' > greeting.txt",
+        command: "mkdir -p /workspace && printf 'hello-from-sandbox' > /workspace/greeting.txt",
         timeout_ms: 30_000,
       }),
     });

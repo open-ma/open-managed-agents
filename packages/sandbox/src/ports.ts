@@ -220,6 +220,11 @@ export interface SandboxPort {
     storeId: string;
     readOnly: boolean;
   }): Promise<void>;
+  /** Flush provider-local writable Memory projections back into their
+   * generation-scoped blob prefixes before the host performs canonical CAS
+   * reconciliation. Native shared mounts omit this because writes are already
+   * visible in the backing store. */
+  synchronizeMemoryStores?(): Promise<void>;
   /** Destroy the sandbox — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
   /**
@@ -269,10 +274,25 @@ export interface SandboxFactoryContext {
    *  via symlink (LocalSubprocess) read from this; remote adapters
    *  (Daytona/E2B) typically use s3fs and ignore it. */
   memoryRoot?: string;
+  /** Host-side text workspace bridge for remote providers without a native
+   * object-store/POSIX mount. The adapter copies a generation-scoped snapshot
+   * into the sandbox and flushes it through `synchronizeMemoryStores` at the
+   * fenced finalization barrier. */
+  memoryWorkspace?: SandboxMemoryWorkspacePort;
   /** Session-outputs root on the host. LocalSubprocess symlinks
    *  per-(tenant, session) dirs under here when mountSessionOutputs
    *  is called; remote adapters that don't host-mount can ignore it. */
   outputsRoot?: string;
+}
+
+export interface SandboxMemoryWorkspacePort {
+  getText(key: string): Promise<{ text: string } | null>;
+  list(prefix: string, cursor?: string): Promise<{
+    keys: string[];
+    nextCursor: string | null;
+  }>;
+  put(key: string, content: string): Promise<unknown | null>;
+  delete(key: string): Promise<void>;
 }
 
 /** Read-only view of process env handed to the factory. Whole `process.env`

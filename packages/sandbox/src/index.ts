@@ -11,6 +11,7 @@ export type {
   SandboxFactory,
   SandboxFactoryContext,
   SandboxFactoryEnv,
+  SandboxMemoryWorkspacePort,
   SandboxProviderPort,
   SandboxRuntimeCapabilities,
   SandboxRuntimeHandle,

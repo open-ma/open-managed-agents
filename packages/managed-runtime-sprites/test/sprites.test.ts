@@ -5,6 +5,7 @@ import {
   createSpritesManagedRuntime,
   createSpritesManagedRuntimeDriver,
   createSpritesProvider,
+  createSpritesSandbox,
   type SpriteFilesystemPort,
   type SpriteSdkPort,
   type SpritesClientPort,
@@ -79,6 +80,125 @@ function client(sprite: FakeSprite): SpritesClientPort {
 }
 
 describe("Sprites managed runtime provider", () => {
+  it("scopes registered repository credentials to matching Sprite commands", async () => {
+    const sprite = new FakeSprite("oma-owned");
+    const runtime = new (await import("../src/sprites")).SpritesRuntime({
+      client: client(sprite),
+      sprite,
+    });
+
+    await runtime.setEnvVars({ OMA_MEMORY_DIR: "/mnt/memory" });
+    runtime.registerCommandSecrets("git", { GIT_AUTH_HEADER: "secret" });
+
+    await runtime.exec("git clone -- https://example.test/repo.git repository");
+    await runtime.exec("github-helper status");
+
+    expect(sprite.execFileHTTP).toHaveBeenNthCalledWith(
+      1,
+      "/bin/sh",
+      ["-lc", "git clone -- https://example.test/repo.git repository"],
+      {
+        cwd: "/workspace",
+        env: {
+          OMA_MEMORY_DIR: "/mnt/memory",
+          GIT_AUTH_HEADER: "secret",
+        },
+        timeout: 120_000,
+      },
+    );
+    expect(sprite.execFileHTTP).toHaveBeenNthCalledWith(
+      2,
+      "/bin/sh",
+      ["-lc", "github-helper status"],
+      {
+        cwd: "/workspace",
+        env: { OMA_MEMORY_DIR: "/mnt/memory" },
+        timeout: 120_000,
+      },
+    );
+  });
+
+  it("propagates global environment without leaking repository credentials to the harness", async () => {
+    const sprite = new FakeSprite("oma-owned");
+    const runtime = new (await import("../src/sprites")).SpritesRuntime({
+      client: client(sprite),
+      sprite,
+    });
+    await runtime.setEnvVars({ OMA_MEMORY_DIR: "/mnt/memory" });
+    runtime.registerCommandSecrets("git", { GIT_AUTH_HEADER: "secret" });
+
+    const process = await runtime.spawnDuplexProcess({
+      command: "openma-acp",
+      args: ["serve"],
+      cwd: "/workspace",
+      env: { SESSION_ID: "session_1" },
+    });
+    await process.exited;
+
+    expect(sprite.spawn).toHaveBeenCalledWith(
+      "/usr/bin/flock",
+      [
+        "--nonblock",
+        "/run/openma-managed-agent.lock",
+        "openma-acp",
+        "serve",
+      ],
+      {
+        cwd: "/workspace",
+        env: {
+          OMA_MEMORY_DIR: "/mnt/memory",
+          SESSION_ID: "session_1",
+        },
+        tty: false,
+        maxRunAfterDisconnect: "1h",
+      },
+    );
+  });
+
+  it("exposes its lifecycle through the standalone Node sandbox factory", async () => {
+    const sprite = new FakeSprite("placeholder");
+    const sdk = client(sprite);
+    (sdk.getSprite as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { statusCode: 404 }),
+    );
+
+    const runtime = await createSpritesSandbox(
+      { sessionId: "session_1", workdir: "/workspace" },
+      {},
+      {
+        client: sdk,
+        createOptions: async (input) => {
+          Object.defineProperty(sprite, "name", { value: input.name });
+          sprite.labels = input.ownershipLabels;
+          return { config: { ramMB: 1024 } };
+        },
+      },
+    );
+
+    expect(sdk.createSprite).toHaveBeenCalledWith(
+      expect.stringMatching(/^oma-[a-f0-9]{32}$/),
+      expect.objectContaining({
+        config: { ramMB: 1024 },
+        labels: expect.arrayContaining(["openma-managed"]),
+      }),
+    );
+    expect(runtime.sessionOutputMountCapabilities()).toEqual({
+      durability: "best_effort",
+    });
+    await runtime.mountSessionOutputs({
+      tenantId: "workspace_1",
+      sessionId: "session_1",
+    });
+    expect(sprite.execFileHTTP).toHaveBeenCalledWith(
+      "/bin/mkdir",
+      ["-p", "/mnt/session/outputs"],
+      expect.objectContaining({ cwd: "/", timeout: 60_000 }),
+    );
+    await runtime.destroy();
+    expect(sprite.closeControlConnection).toHaveBeenCalledOnce();
+    expect(sdk.deleteSprite).toHaveBeenCalledWith(sprite.name);
+  });
+
   it("uses stable identity, persistent filesystem, auto-pause handoff, and duplex execution", async () => {
     const sprite = new FakeSprite("placeholder");
     const sdk = client(sprite);
@@ -141,7 +261,12 @@ describe("Sprites managed runtime provider", () => {
       driver: { type: "ama_worker", process: { command: "worker", args: ["--poll"] } },
       signal,
     })).resolves.toEqual({ type: "completed" });
-    expect(sprite.spawn).toHaveBeenCalledWith("worker", ["--poll"], expect.objectContaining({
+    expect(sprite.spawn).toHaveBeenCalledWith("/usr/bin/flock", [
+      "--nonblock",
+      "/run/openma-managed-agent.lock",
+      "worker",
+      "--poll",
+    ], expect.objectContaining({
       cwd: "/workspace",
       tty: false,
     }));

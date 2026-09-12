@@ -39,6 +39,7 @@ function createSprite(name: string, options: SpritesCreateOptions = {}): SpriteS
       const stdin = new PassThrough();
       const stdout = new PassThrough();
       const stderr = new PassThrough();
+      queueMicrotask(() => { stdout.end(); stderr.end(); });
       return {
         stdin, stdout, stderr,
         once(event: "spawn" | "error", listener: (...args: unknown[]) => void) {

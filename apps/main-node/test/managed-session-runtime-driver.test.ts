@@ -87,6 +87,73 @@ interface DriverConstructor {
 }
 
 describe("DefaultNodeManagedSessionRuntimeDriver", () => {
+  it("projects a terminal error and idle state when sandbox startup fails", async () => {
+    const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine: {
+        start: async () => { throw new Error("sprite preparation failed"); },
+        stop: async () => {},
+        accept: async () => {},
+        archiveThread: async () => {},
+      },
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async (command) => {
+          projectionCalls.push(structuredClone(command));
+          return { type: "recorded", session };
+        },
+      }),
+      clock: { now: () => new Date("2026-08-26T00:30:00.000Z") },
+      ids: {
+        nextEventId: (() => {
+          let id = 0;
+          return () => `event_start_failure_0${++id}`;
+        })(),
+      },
+    });
+
+    await expect(driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_input_start_failure",
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:29:00.000Z",
+      }],
+      executionFence,
+    })).rejects.toThrow("sprite preparation failed");
+
+    expect(projectionCalls).toEqual([
+      {
+        sessionId: "session_01",
+        events: [{
+          id: "event_start_failure_01",
+          type: "session.error",
+          error: {
+            type: "unknown_error",
+            message: "sprite preparation failed",
+            retryStatus: "terminal",
+          },
+          processedAt: "2026-08-26T00:30:00.000Z",
+        }],
+        executionFence,
+      },
+      {
+        sessionId: "session_01",
+        events: [{
+          id: "event_start_failure_02",
+          type: "session.status_idle",
+          stopReason: { type: "end_turn" },
+          processedAt: "2026-08-26T00:30:00.000Z",
+        }],
+        executionFence,
+      },
+    ]);
+  });
+
   it("commits runtime output under the execution fence that produced it", async () => {
     let emit: ((frame: unknown) => Promise<void>) | undefined;
     const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];

@@ -4,6 +4,10 @@ import { afterAll } from "vitest";
 
 const OWNED_PREFIXES = ["oma-", "openma-"] as const;
 
+// Process-level tests spawn the real production entry. Exercise its isolated
+// local provider rather than relying on the removed host-subprocess fallback.
+process.env.SANDBOX_PROVIDER ??= "litebox";
+
 async function ownedEntries(): Promise<Set<string>> {
   return new Set(
     (await readdir(tmpdir()))

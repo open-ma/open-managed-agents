@@ -77,6 +77,9 @@ export interface DispatchedManagedEnvironmentWorkerOptions {
   dispatch: ManagedEnvironmentWorkDispatchPort;
   workerId?: string;
   fallbackPollIntervalMs?: number;
+  /** Upper bound for one drain invocation. Serverless entrypoints should set
+   * this so a burst cannot consume the whole Function lifetime. */
+  maxWorkItemsPerDrain?: number;
   reclaimOlderThanMs?: number;
   webhookKey?: string;
   sandboxApiBaseUrl?: string;
@@ -130,6 +133,13 @@ export function createDispatchedManagedEnvironmentWorker(
   if (!Number.isSafeInteger(fallbackPollIntervalMs) || fallbackPollIntervalMs <= 0) {
     throw new RangeError("fallbackPollIntervalMs must be a positive integer");
   }
+  const maxWorkItemsPerDrain = options.maxWorkItemsPerDrain ?? Number.POSITIVE_INFINITY;
+  if (
+    maxWorkItemsPerDrain !== Number.POSITIVE_INFINITY
+    && (!Number.isSafeInteger(maxWorkItemsPerDrain) || maxWorkItemsPerDrain <= 0)
+  ) {
+    throw new RangeError("maxWorkItemsPerDrain must be a positive integer");
+  }
   const runnerClient = options.client.withOptions({
     apiKey: null,
     authToken: options.environmentKey,
@@ -145,7 +155,8 @@ export function createDispatchedManagedEnvironmentWorker(
   };
 
   const drainOnce = async (signal: AbortSignal): Promise<"drained" | "dispatch_failed"> => {
-    while (!signal.aborted) {
+    let handled = 0;
+    while (!signal.aborted && handled < maxWorkItemsPerDrain) {
       const work = await runnerClient.beta.environments.work.poll(
         options.environmentId,
         {
@@ -160,6 +171,7 @@ export function createDispatchedManagedEnvironmentWorker(
         { signal },
       );
       if (work === null) return "drained";
+      handled += 1;
       if (work.data.type !== "session") {
         await runnerClient.beta.environments.work.stop(
           work.id,
