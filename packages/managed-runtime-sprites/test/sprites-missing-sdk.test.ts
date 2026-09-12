@@ -23,6 +23,11 @@ function acquisition() {
     workspace: { bindingId: "workspace", mountPath: "/workspace" as const },
     outputs: null,
     credentialEgress: null,
+    environment: {
+      type: "base" as const,
+      identity: "sprites:preinstalled",
+      artifact: { type: "preinstalled" as const },
+    },
     signal: new AbortController().signal,
   };
 }

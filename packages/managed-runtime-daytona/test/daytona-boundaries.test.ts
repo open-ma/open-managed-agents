@@ -41,7 +41,10 @@ function sandbox(input: {
       createFolder: vi.fn(async () => undefined),
     },
     process: {
-      executeCommand: vi.fn(async () => input.execute ?? ({ exitCode: 0, result: "" })),
+      executeCommand: vi.fn(async (command: string) =>
+        command.includes("__OPENMA_RUNTIME_READY__")
+          ? { exitCode: 0, result: "__OPENMA_RUNTIME_READY__" }
+          : input.execute ?? ({ exitCode: 0, result: "" })),
       createSession: vi.fn(async () => undefined),
       executeSessionCommand: vi.fn(async () => ({ cmdId: "command" })),
       getSessionCommandLogs: vi.fn(async (
@@ -89,7 +92,7 @@ function runtime(value = sandbox().value) {
 
 async function resources(client: DaytonaClientPort, options: Record<string, unknown> = {}) {
   return createDaytonaManagedRuntime({
-    client, environmentId: scope.environmentId, leaseTtlMs: 100, ...options,
+    client, environmentId: scope.environmentId, leaseTtlMs: 100, image: "image", ...options,
   });
 }
 
@@ -120,8 +123,13 @@ describe("Daytona provider boundary contracts", () => {
       apiKey: "key",
       apiUrl: "https://daytona",
       target: "us",
+      image: "image",
     });
-    await createDaytonaManagedRuntime({ environmentId: scope.environmentId, leaseTtlMs: 100 });
+    await createDaytonaManagedRuntime({
+      environmentId: scope.environmentId,
+      leaseTtlMs: 100,
+      image: "image",
+    });
     expect(fixtureConstructorInputs).toEqual([
       { apiKey: "key", apiUrl: "https://daytona", target: "us" },
       {},
@@ -322,8 +330,10 @@ describe("Daytona provider boundary contracts", () => {
 
     const defaults = sandbox();
     const defaultClient = client(defaults.value, { getError: Object.assign(new Error(), { name: "DaytonaNotFoundError" }) });
-    await acquire(defaultClient, { image: undefined });
-    expect(defaultClient.create).toHaveBeenCalledWith(expect.objectContaining({ image: "node:22-slim" }), { timeout: 300 });
+    await expect(acquire(defaultClient, { image: undefined })).rejects.toThrow(
+      "Daytona managed runtime requires an Environment image or snapshot",
+    );
+    expect(defaultClient.create).not.toHaveBeenCalled();
   });
 
   it("propagates non-not-found and non-conflict failures and recognizes all status shapes", async () => {
@@ -420,7 +430,7 @@ describe("Daytona provider boundary contracts", () => {
     };
     const sessionInputs = { materialize: vi.fn(), synchronize: vi.fn() };
     const driver = createDaytonaManagedRuntimeDriver({
-      client: client(value), leaseTtlMs: 100, outputStore: new InMemoryBlobStore(),
+      client: client(value), leaseTtlMs: 100, image: "image", outputStore: new InMemoryBlobStore(),
       outputKeyPrefix: "outputs", credentialEgress: egress, sessionInputs,
       readiness: { timeoutMs: 500 },
     });
@@ -433,7 +443,9 @@ describe("Daytona provider boundary contracts", () => {
     expect(projected).toMatchObject({ sessionInputs });
     await expect(projected.credentialEgress?.capabilities(scope)).resolves.toEqual(egress.capabilities);
 
-    const plain = createDaytonaManagedRuntimeDriver({ client: client(value), leaseTtlMs: 100, outputStore: null });
+    const plain = createDaytonaManagedRuntimeDriver({
+      client: client(value), leaseTtlMs: 100, image: "image", outputStore: null,
+    });
     expect(plain.descriptor().capabilities.outputs.strategies).toEqual([]);
     const plainProjected = await plain.create({ placement: "in_process", environmentId: scope.environmentId } as never);
     expect(plainProjected).not.toHaveProperty("credentialEgress");
@@ -441,6 +453,7 @@ describe("Daytona provider boundary contracts", () => {
 
     const defaultOutput = await createDaytonaManagedRuntime({
       client: client(value), environmentId: scope.environmentId, leaseTtlMs: 100,
+      image: "image",
       outputStore: new InMemoryBlobStore(),
     });
     await expect(defaultOutput.outputs.capabilities(scope)).resolves.toMatchObject({ strategies: [expect.any(Object)] });

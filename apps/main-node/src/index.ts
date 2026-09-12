@@ -985,7 +985,7 @@ async function resolveNodeMcpProxyTarget(input: {
     const server = managedContext.session.agent.mcpServers.find(
       (candidate) => candidate.name === input.serverName,
     );
-    if (server === undefined || !server.url) return null;
+    if (server === undefined || server.type !== "url") return null;
     for (const vaultId of managedContext.session.vaultIds) {
       const records = await managedCredentialStore.list({
         workspaceId: input.tenantId,

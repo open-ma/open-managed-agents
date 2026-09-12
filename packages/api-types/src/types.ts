@@ -55,26 +55,22 @@ export interface AgentConfig {
   };
   system: string;
   tools: ToolConfig[];
-  mcp_servers?: Array<{
-    name: string;
-    type: string;
-    /** Required for remote (HTTP/SSE) servers. Optional when `stdio` is set —
-     *  in that case the URL is derived from the spawned process's localhost port. */
-    url?: string;
-    authorization_token?: string;
-    /** Provider-specific stdio declaration for an external/in-sandbox
-     *  runtime that owns the process and transport. Host-side OpenMA
-     *  harnesses require `url`: a sandbox's 127.0.0.1 is not implicitly
-     *  reachable from the control-plane process. */
-    stdio?: {
-      command: string;             // e.g. "uvx"
-      args?: string[];             // e.g. ["my-mcp-server", "--transport", "sse", "--port", "8765"]
-      env?: Record<string, string>;
-      port: number;                // port the server listens on inside the sandbox
-      sse_path?: string;           // default "/sse"
-      ready_timeout_ms?: number;   // default 60000 — how long to wait for the port to bind
-    };
-  }>;
+  mcp_servers?: Array<
+    | {
+        name: string;
+        type: "url" | "http" | "sse";
+        url: string;
+        authorization_token?: string;
+      }
+    | {
+        /** Standard MCP stdio transport, launched by the sandbox Agent. */
+        name: string;
+        type: "stdio";
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+      }
+  >;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   /**

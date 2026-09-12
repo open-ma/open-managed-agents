@@ -41,7 +41,16 @@ class FakeSprite implements SpriteSdkPort {
   labels: string[] = [];
   readonly filesystemPort = new FakeFilesystem();
   readonly filesystem = vi.fn(() => this.filesystemPort);
-  readonly execFileHTTP = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+  readonly execFileHTTP = vi.fn(async (
+    _executable: string,
+    args: string[],
+  ) => ({
+    stdout: args.some((argument) => argument.includes("__OPENMA_RUNTIME_READY__"))
+      ? "__OPENMA_RUNTIME_READY__"
+      : "",
+    stderr: "",
+    exitCode: 0,
+  }));
   readonly closeControlConnection = vi.fn();
   readonly check = vi.fn(async () => ({ status: this.status }));
   readonly delete = vi.fn(async () => {});
@@ -297,6 +306,11 @@ describe("Sprites managed runtime provider", () => {
         workspace: { bindingId: "binding", mountPath: "/workspace" },
         outputs: null,
         credentialEgress: null,
+        environment: {
+          type: "base",
+          identity: "sprites:preinstalled",
+          artifact: { type: "preinstalled" },
+        },
         signal: new AbortController().signal,
       },
     )).rejects.toThrow("ownership labels");

@@ -1,9 +1,12 @@
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
   type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
   type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -169,6 +172,7 @@ export interface BlaxelProviderOptions {
 
 export interface BlaxelManagedRuntimeOptions extends BlaxelProviderOptions {
   leaseTtlMs: number;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<BlaxelRuntime>;
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   credentialEgress?: ProviderManagedRuntimeOptions<BlaxelRuntime>["credentialEgress"];
@@ -506,7 +510,11 @@ function createBlaxelProviderWithSdk(
         ...(options.lifecycle === undefined ? {} : { lifecycle: options.lifecycle }),
         ...extra,
         name,
-        image: options.image,
+        image: requireRuntimeEnvironmentArtifact(
+          acquisition.environment,
+          providerName,
+          ["image"],
+        ).reference,
         labels,
         externalId: stableExternalId(
           acquisition.scope.environmentId,
@@ -574,6 +582,12 @@ export function createBlaxelManagedRuntime(options: BlaxelManagedRuntimeOptions)
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: options.image,
+        artifact: { type: "image", reference: options.image },
+      }),
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {

@@ -68,16 +68,27 @@ const app = new Hono<{
   Variables: { services: Services; tenantDb: D1Database };
 }>();
 
+type McpProxyServer =
+  | {
+      name: string;
+      type: "url";
+      url: string;
+      authorizationToken?: string;
+    }
+  | {
+      name: string;
+      type: "stdio";
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+    };
+
 export interface McpProxySessionSource {
   find(input: { workspaceId: string; sessionId: string }): Promise<{
     archivedAt: string | null;
     vaultIds: string[];
     agent: {
-      mcpServers: Array<{
-        name: string;
-        url: string;
-        authorizationToken?: string;
-      }>;
+      mcpServers: McpProxyServer[];
     };
   } | null>;
 }
@@ -267,11 +278,7 @@ export async function resolveProxyTargetByTenant(
     archivedAt?: string | null;
     vaultIds?: string[] | null;
     agent?: {
-      mcpServers?: Array<{
-        name: string;
-        url: string;
-        authorizationToken?: string;
-      }>;
+      mcpServers?: McpProxyServer[];
     };
   };
   if (legacySession.archived_at || managedSession.archivedAt) return null;
@@ -283,7 +290,7 @@ export async function resolveProxyTargetByTenant(
     : (managedSession.agent?.mcpServers ?? []).find(
         (candidate) => candidate.name === serverName,
       );
-  if (!server || !server.url) return null;
+  if (!server || !("url" in server) || !server.url) return null;
 
   // 3. Resolve credential. agent.mcp_servers[].authorization_token, if set,
   //    is the literal token we should inject. Otherwise look up an active

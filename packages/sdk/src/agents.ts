@@ -1,8 +1,15 @@
 import type {
+  AgentCreateParams,
+  AgentUpdateParams,
+  BetaManagedAgentsAgent,
+  BetaManagedAgentsMCPServerURLDefinition,
+  BetaManagedAgentsURLMCPServerParams,
   BetaManagedAgentsModel,
   BetaManagedAgentsModelConfig,
   BetaManagedAgentsModelConfigParams,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
+import type Anthropic from "@anthropic-ai/sdk";
+import type { APIPromise } from "@anthropic-ai/sdk/api-promise";
 
 export type OpenMaJsonValue =
   | string
@@ -19,6 +26,44 @@ export interface OpenMaProviderOptions {
 export type OpenMaAgentModelParams =
   | BetaManagedAgentsModel
   | BetaManagedAgentsModelConfigParams;
+
+/** OpenMA extension for a standard MCP process launched inside the sandbox. */
+export interface OpenMaStdioMcpServerParams {
+  name: string;
+  type: "stdio";
+  /** Absolute executable path inside the sandbox. */
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export type OpenMaMcpServerParams =
+  | BetaManagedAgentsURLMCPServerParams
+  | OpenMaStdioMcpServerParams;
+
+export interface OpenMaStdioMcpServer {
+  name: string;
+  type: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export type OpenMaMcpServer =
+  | BetaManagedAgentsMCPServerURLDefinition
+  | OpenMaStdioMcpServer;
+
+export type OpenMaAgentCreateParams = Omit<AgentCreateParams, "mcp_servers"> & {
+  mcp_servers?: OpenMaMcpServerParams[];
+};
+
+export type OpenMaAgentUpdateParams = Omit<AgentUpdateParams, "mcp_servers"> & {
+  mcp_servers?: OpenMaMcpServerParams[] | null;
+};
+
+export type OpenMaAgent = Omit<BetaManagedAgentsAgent, "mcp_servers"> & {
+  mcp_servers: OpenMaMcpServer[];
+};
 
 export interface OpenMaAgentAcpParams {
   agent: {
@@ -81,6 +126,18 @@ export interface OpenMaAgentExtension {
 }
 
 declare module "@anthropic-ai/sdk/resources/beta/agents/agents" {
+  interface Agents {
+    create(
+      params: OpenMaAgentCreateParams,
+      options?: Anthropic.RequestOptions,
+    ): APIPromise<OpenMaAgent>;
+    update(
+      agentID: string,
+      params: OpenMaAgentUpdateParams,
+      options?: Anthropic.RequestOptions,
+    ): APIPromise<OpenMaAgent>;
+  }
+
   interface BetaManagedAgentsModelConfigParams {
     /** OpenMA extension for provider-namespaced inference options. */
     provider_options?: OpenMaProviderOptions | null;

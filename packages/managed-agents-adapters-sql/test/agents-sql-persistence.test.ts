@@ -61,6 +61,13 @@ const agent: AgentRecord = {
   description: null,
   mcpServers: [
     { type: "url", name: "docs", url: "https://mcp.example.test" },
+    {
+      type: "stdio",
+      name: "workspace",
+      command: "/usr/local/bin/workspace-mcp",
+      args: ["--root", "/workspace"],
+      env: { LOG_LEVEL: "info" },
+    },
   ],
   metadata: { owner: "platform" },
   model: {

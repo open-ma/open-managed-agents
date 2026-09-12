@@ -49,11 +49,16 @@ export interface ManagedAcpSessionAgentSnapshot {
   readonly id: string;
   readonly version: number;
   readonly model: Readonly<Record<string, unknown>> & { readonly id: string };
-  readonly mcp_servers: readonly {
-    readonly type: "url";
-    readonly name: string;
-    readonly url: string;
-  }[];
+  readonly mcp_servers: readonly (
+    | { readonly type: "url"; readonly name: string; readonly url: string }
+    | {
+        readonly type: "stdio";
+        readonly name: string;
+        readonly command: string;
+        readonly args?: readonly string[];
+        readonly env?: Readonly<Record<string, string>>;
+      }
+  )[];
   readonly skills: readonly ManagedAcpSkillSnapshot[];
   readonly system: string | null;
   readonly tools: readonly Readonly<Record<string, unknown>>[];
@@ -298,6 +303,23 @@ export function decodeManagedAcpSessionSnapshot(
   if (!Array.isArray(agent.mcp_servers)) throw invalidSession("agent.mcp_servers");
   const mcpServers = agent.mcp_servers.map((candidate, index) => {
     if (
+      isRecord(candidate)
+      && candidate.type === "stdio"
+      && isNonEmptyString(candidate.name)
+      && isNonEmptyString(candidate.command)
+      && candidate.command.startsWith("/")
+      && (candidate.args === undefined || stringArray(candidate.args) !== null)
+      && (candidate.env === undefined || stringRecord(candidate.env) !== null)
+    ) {
+      return {
+        type: "stdio" as const,
+        name: candidate.name,
+        command: candidate.command,
+        ...(candidate.args === undefined ? {} : { args: stringArray(candidate.args)! }),
+        ...(candidate.env === undefined ? {} : { env: stringRecord(candidate.env)! }),
+      };
+    }
+    if (
       !isRecord(candidate)
       || candidate.type !== "url"
       || !isNonEmptyString(candidate.name)
@@ -319,6 +341,19 @@ export function decodeManagedAcpSessionSnapshot(
       tools,
     },
   };
+}
+
+function stringArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? [...value]
+    : null;
+}
+
+function stringRecord(value: unknown): Record<string, string> | null {
+  if (!isRecord(value)) return null;
+  return Object.values(value).every((entry) => typeof entry === "string")
+    ? { ...value } as Record<string, string>
+    : null;
 }
 
 async function materializeSkills(input: {

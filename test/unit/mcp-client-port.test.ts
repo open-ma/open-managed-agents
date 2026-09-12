@@ -217,7 +217,7 @@ describe("OpenMA MCP client port", () => {
       mcp_servers: [{
         name: "local",
         type: "stdio",
-        stdio: { command: "demo", port: 43123 },
+        command: "/usr/local/bin/demo",
       }],
       version: 1,
       created_at: new Date().toISOString(),
@@ -226,7 +226,7 @@ describe("OpenMA MCP client port", () => {
       tenantId: "tenant-1",
       sessionId: "session-1",
     })).rejects.toThrow(
-      'Declared MCP server "local" has no prepared URL',
+      'Standard MCP stdio server "local" requires a harness-in-sandbox runtime',
     );
     expect(fake.state.requests).toHaveLength(0);
   });

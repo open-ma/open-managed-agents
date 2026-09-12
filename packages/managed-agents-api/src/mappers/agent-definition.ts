@@ -185,6 +185,15 @@ function toCustomToolInputSchema(value: object): AgentCustomToolInputSchema {
 export function toAgentMcpServerInput(
   server: WireMcpServer,
 ): AgentMcpServerInput {
+  if (server.type === "stdio") {
+    return {
+      name: server.name,
+      type: server.type,
+      command: server.command,
+      ...(server.args !== undefined && { args: server.args }),
+      ...(server.env !== undefined && { env: server.env }),
+    };
+  }
   return { name: server.name, type: server.type, url: server.url };
 }
 
@@ -358,6 +367,15 @@ function fromResolvedToolConfig(config: AgentToolConfigInput): object {
 }
 
 export function fromAgentMcpServerInput(server: AgentMcpServerInput): object {
+  if (server.type === "stdio") {
+    return {
+      name: server.name,
+      type: server.type,
+      command: server.command,
+      ...(server.args !== undefined && { args: server.args }),
+      ...(server.env !== undefined && { env: server.env }),
+    };
+  }
   return { name: server.name, type: server.type, url: server.url };
 }
 

@@ -133,8 +133,11 @@ export function materializeAgentUpdate(
 
 export interface McpEntry {
   name: string;
-  type: string;
+  type: "url" | "stdio";
   url: string;
+  command: string;
+  argsJson: string;
+  envJson: string;
   /** Stable identity used to preserve fields when an existing server is renamed. */
   originalName?: string;
 }
@@ -308,8 +311,15 @@ export function configToForm(config: Record<string, unknown>): FormState {
     mcpServers: Array.isArray(config.mcp_servers)
       ? (config.mcp_servers as Array<Record<string, unknown>>).map((m) => ({
           name: String(m.name || ""),
-          type: String(m.type || "url"),
+          type: m.type === "stdio" ? "stdio" as const : "url" as const,
           url: typeof m.url === "string" ? m.url : "",
+          command: typeof m.command === "string" ? m.command : "",
+          argsJson: JSON.stringify(Array.isArray(m.args) ? m.args : []),
+          envJson: JSON.stringify(
+            m.env && typeof m.env === "object" && !Array.isArray(m.env)
+              ? m.env
+              : {},
+          ),
           originalName: String(m.name || "") || undefined,
         }))
       : [],
@@ -549,8 +559,8 @@ function mergeMultiagent(
 }
 
 /**
- * Merge form MCP rows onto existing servers by name so stdio / auth / extra
- * keys survive a name/url-only edit. Removed form rows are dropped.
+ * Merge form MCP rows onto existing servers by name while preserving unknown
+ * extension keys. Removed form rows are dropped.
  */
 export function mergeMcpServers(
   existing: unknown[] | undefined,
@@ -571,18 +581,38 @@ export function mergeMcpServers(
     .filter((m) => m.name)
     .map((m) => {
       const prior = priorByName.get(m.originalName || m.name);
-      if (!prior) {
-        return { name: m.name, type: m.type || "url", ...(m.url ? { url: m.url } : {}) };
-      }
-      const next: Record<string, unknown> = { ...prior, name: m.name, type: m.type || prior.type || "url" };
-      if (m.url) next.url = m.url;
-      else if (m.type === "stdio" && prior.stdio) {
-        // stdio-hosted servers often have no remote URL — don't invent one.
+      const next: Record<string, unknown> = {
+        ...(prior ?? {}),
+        name: m.name,
+        type: m.type,
+      };
+      if (m.type === "stdio") {
+        if (!m.command.startsWith("/")) {
+          throw new Error(`MCP stdio command for "${m.name}" must be an absolute path`);
+        }
+        const args = JSON.parse(m.argsJson || "[]") as unknown;
+        if (!Array.isArray(args) || !args.every((value) => typeof value === "string")) {
+          throw new Error(`MCP stdio args for "${m.name}" must be a JSON string array`);
+        }
+        const env = JSON.parse(m.envJson || "{}") as unknown;
+        if (
+          !env || typeof env !== "object" || Array.isArray(env)
+          || !Object.values(env).every((value) => typeof value === "string")
+        ) {
+          throw new Error(`MCP stdio env for "${m.name}" must be a JSON string map`);
+        }
         delete next.url;
-      } else if (!m.url && typeof prior.url === "string") {
-        // Keep prior url when the form left it blank (stdio / incomplete edit).
-        next.url = prior.url;
+        delete next.stdio;
+        next.command = m.command;
+        next.args = args;
+        next.env = env;
+        return next;
       }
+      delete next.command;
+      delete next.args;
+      delete next.env;
+      delete next.stdio;
+      if (m.url) next.url = m.url;
       return next;
     });
 }

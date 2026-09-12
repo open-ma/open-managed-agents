@@ -216,6 +216,38 @@ describe("agentFormCodec lossless update", () => {
     });
   });
 
+  it("round-trips the standard MCP stdio shape without HTTP adapter fields", () => {
+    const agent = sampleAgent({
+      mcp_servers: [{
+        name: "workspace",
+        type: "stdio",
+        command: "/usr/local/bin/workspace-mcp",
+        args: ["--root", "/workspace"],
+        env: { LOG_LEVEL: "info" },
+      }],
+    } as Partial<AgentRecord>);
+
+    const form = agentToForm(agent);
+    expect(form.mcpServers).toEqual([{
+      name: "workspace",
+      originalName: "workspace",
+      type: "stdio",
+      url: "",
+      command: "/usr/local/bin/workspace-mcp",
+      argsJson: '["--root","/workspace"]',
+      envJson: '{"LOG_LEVEL":"info"}',
+    }]);
+    expect(mergeMcpServers(agent.mcp_servers as unknown[], form.mcpServers)).toEqual([
+      {
+        name: "workspace",
+        type: "stdio",
+        command: "/usr/local/bin/workspace-mcp",
+        args: ["--root", "/workspace"],
+        env: { LOG_LEVEL: "info" },
+      },
+    ]);
+  });
+
   it("preserves MCP config and tool policy when an existing server is renamed", () => {
     const agent = sampleAgent();
     const form = agentToForm(agent);

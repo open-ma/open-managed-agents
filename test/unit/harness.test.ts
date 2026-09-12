@@ -560,7 +560,10 @@ describe("Sandbox lifecycle", () => {
         kind: "filesystem",
         scope: "portable",
       }),
-      exec: async () => "",
+      exec: async (command: string) =>
+        command.includes("__OPENMA_RUNTIME_READY__")
+          ? "__OPENMA_RUNTIME_READY__"
+          : "",
       readFile: async () => "",
       writeFile: async (path: string) => path,
       destroy: async () => {},
@@ -654,7 +657,10 @@ describe("Sandbox lifecycle", () => {
         kind: "filesystem",
         scope: "portable",
       }),
-      exec: async () => "",
+      exec: async (command: string) =>
+        command.includes("__OPENMA_RUNTIME_READY__")
+          ? "__OPENMA_RUNTIME_READY__"
+          : "",
       readFile: async () => "",
       writeFile: async (path: string) => path,
       destroy: async () => {},

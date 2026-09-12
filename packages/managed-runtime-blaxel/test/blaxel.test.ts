@@ -39,12 +39,15 @@ class FakeBlaxelSandbox implements BlaxelSandboxSdkPort {
       onStderr?: (chunk: string) => void;
     }) => {
       request.onStdout?.("worker output");
+      const stdout = request.command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : "";
       return {
         name: request.name ?? "probe",
         pid: "12",
         status: request.name === undefined ? "completed" : "running",
         exitCode: 0,
-        stdout: "",
+        stdout,
         stderr: "",
         logs: "",
         command: request.command,
@@ -123,6 +126,12 @@ describe("Blaxel managed runtime provider", () => {
     const runtime = createBlaxelManagedRuntime({
       client,
       image: "sandbox/cma-worker:latest",
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "custom-blaxel-image",
+        artifact: { type: "image", reference: "registry.example/openma-blaxel:custom" },
+        prepare: async () => {},
+      },
       leaseTtlMs: 90_000,
       outputStore: null,
       allocationOptions,
@@ -158,7 +167,7 @@ describe("Blaxel managed runtime provider", () => {
     expect(client.createIfNotExists).toHaveBeenCalledWith(expect.objectContaining({
       name: expect.stringMatching(/^oma-[a-f0-9]{32}$/),
       externalId: expect.stringMatching(/^openma:/),
-      image: "sandbox/cma-worker:latest",
+      image: "registry.example/openma-blaxel:custom",
       memory: 2048,
       labels: expectedLabels,
       network: { firewall: { rulesets: ["proxy"] } },
@@ -251,6 +260,11 @@ describe("Blaxel managed runtime provider", () => {
         workspace: { bindingId: "binding", mountPath: "/workspace" },
         outputs: null,
         credentialEgress: null,
+        environment: {
+          type: "base",
+          identity: "sandbox/cma-worker:latest",
+          artifact: { type: "image", reference: "sandbox/cma-worker:latest" },
+        },
         signal: new AbortController().signal,
       },
     )).rejects.toThrow("ownership labels");

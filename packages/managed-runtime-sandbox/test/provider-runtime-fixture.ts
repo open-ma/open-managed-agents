@@ -93,7 +93,11 @@ export function runtime(
       kind: "memory",
       scope: "portable",
     } satisfies SandboxCheckpointHandle)),
-    exec: vi.fn(async () => ""),
+    exec: vi.fn(async (command: string) =>
+      command.includes("__OPENMA_RUNTIME_READY__")
+        ? "__OPENMA_RUNTIME_READY__"
+        : ""
+    ),
     readFile: vi.fn(async () => ""),
     readFileBytes: vi.fn(async () => new Uint8Array()),
     writeFile: vi.fn(async (path: string) => path),

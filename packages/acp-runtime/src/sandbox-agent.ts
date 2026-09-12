@@ -59,11 +59,24 @@ export interface AcpSandboxAgentStatePort {
 
 export type AcpSandboxAgentReleaseReason = "replace" | "shutdown" | "destroy";
 
-export interface ManagedMcpServerForSandbox {
+export interface ManagedUrlMcpServerForSandbox {
   readonly name: string;
-  readonly type: string;
-  readonly url?: string;
+  readonly type: "url" | "sse" | "http";
+  readonly url: string;
 }
+
+/** Standard MCP stdio launch declaration projected into ACP session setup. */
+export interface ManagedStdioMcpServerForSandbox {
+  readonly name: string;
+  readonly type: "stdio";
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+}
+
+export type ManagedMcpServerForSandbox =
+  | ManagedUrlMcpServerForSandbox
+  | ManagedStdioMcpServerForSandbox;
 
 export interface ProjectedAcpHttpMcpServer {
   readonly type: "http";
@@ -71,6 +84,17 @@ export interface ProjectedAcpHttpMcpServer {
   readonly url: string;
   readonly headers: [{ name: "Authorization"; value: string }];
 }
+
+export interface ProjectedAcpStdioMcpServer {
+  readonly name: string;
+  readonly command: string;
+  readonly args: string[];
+  readonly env: Array<{ name: string; value: string }>;
+}
+
+export type ProjectedAcpMcpServer =
+  | ProjectedAcpHttpMcpServer
+  | ProjectedAcpStdioMcpServer;
 
 const LIFECYCLE_POLICY: AcpSandboxAgentLifecyclePolicy = {
   onShutdown: "retain",
@@ -140,26 +164,39 @@ export function managedMcpProxyFromWorkEnvironment(input: {
  */
 export function projectAcpSandboxMcpServers(input: {
   sessionId: string;
-  gatewayBaseUrl: string;
-  sessionsToken: string;
+  gatewayBaseUrl?: string;
+  sessionsToken?: string;
   servers: readonly ManagedMcpServerForSandbox[];
-}): ProjectedAcpHttpMcpServer[] {
-  if (input.sessionId.length === 0 || input.sessionsToken.length === 0) {
+}): ProjectedAcpMcpServer[] {
+  const urlServers = input.servers.filter((server) => server.type !== "stdio");
+  if (urlServers.length > 0 && (
+    input.sessionId.length === 0
+    || !input.sessionsToken
+    || !input.gatewayBaseUrl
+  )) {
     throw new Error("ACP sandbox MCP proxy requires a Session id and Work token");
   }
-  const gateway = new URL(input.gatewayBaseUrl);
-  if (gateway.protocol !== "http:" && gateway.protocol !== "https:") {
-    throw new Error("ACP sandbox MCP proxy gateway must use HTTP or HTTPS");
-  }
-  gateway.username = "";
-  gateway.password = "";
-  gateway.search = "";
-  gateway.hash = "";
-  return input.servers.flatMap((server) => {
-    if (!server.url || server.type === "stdio" || server.type === "stdio_proxy") {
-      return [];
+  let gateway: URL | undefined;
+  if (urlServers.length > 0) {
+    gateway = new URL(input.gatewayBaseUrl!);
+    if (gateway.protocol !== "http:" && gateway.protocol !== "https:") {
+      throw new Error("ACP sandbox MCP proxy gateway must use HTTP or HTTPS");
     }
-    const url = new URL(gateway.origin);
+    gateway.username = "";
+    gateway.password = "";
+    gateway.search = "";
+    gateway.hash = "";
+  }
+  return input.servers.flatMap<ProjectedAcpMcpServer>((server) => {
+    if (server.type === "stdio") {
+      return [{
+        name: server.name,
+        command: server.command,
+        args: [...(server.args ?? [])],
+        env: Object.entries(server.env ?? {}).map(([name, value]) => ({ name, value })),
+      }];
+    }
+    const url = new URL(gateway!.origin);
     url.pathname = [
       "v1",
       "oma",
@@ -173,7 +210,7 @@ export function projectAcpSandboxMcpServers(input: {
       url: url.toString(),
       headers: [{
         name: "Authorization" as const,
-        value: `Bearer ${input.sessionsToken}`,
+        value: `Bearer ${input.sessionsToken!}`,
       }],
     }];
   });

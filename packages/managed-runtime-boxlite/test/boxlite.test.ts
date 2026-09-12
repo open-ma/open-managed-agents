@@ -28,7 +28,7 @@ function source(...chunks: string[]) {
   return { async next() { return chunks[index++] ?? null; } };
 }
 
-function execution(exitCode = 0): BoxLiteExecutionPort {
+function execution(exitCode = 0, output = "worker output"): BoxLiteExecutionPort {
   return {
     id: vi.fn(async () => "exec_1"),
     stdin: vi.fn(async () => ({
@@ -36,7 +36,7 @@ function execution(exitCode = 0): BoxLiteExecutionPort {
       writeString: vi.fn(async () => {}),
       close: vi.fn(async () => {}),
     })),
-    stdout: vi.fn(async () => source("worker output")),
+    stdout: vi.fn(async () => source(output)),
     stderr: vi.fn(async () => source()),
     wait: vi.fn(async () => ({ exitCode })),
     kill: vi.fn(async () => {}),
@@ -47,7 +47,13 @@ function execution(exitCode = 0): BoxLiteExecutionPort {
 class FakeBox implements BoxLiteBoxSdkPort {
   readonly id = "box_1";
   running = false;
-  readonly exec = vi.fn(async () => execution());
+  readonly exec = vi.fn(async (_command: string, args?: string[]) =>
+    execution(
+      0,
+      args?.some((argument) => argument.includes("__OPENMA_RUNTIME_READY__")) === true
+        ? "__OPENMA_RUNTIME_READY__"
+        : "worker output",
+    ));
   readonly copyIn = vi.fn(async () => {});
   readonly copyOut = vi.fn(async () => {});
   readonly start = vi.fn(async () => { this.running = true; });
@@ -85,6 +91,12 @@ describe("BoxLite managed runtime provider", () => {
       providerId: "litebox",
       client: sdk,
       image: "node:22-slim",
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "custom-boxlite-image",
+        artifact: { type: "image", reference: "registry.example/openma-custom:sha256-test" },
+        prepare: async () => {},
+      },
       leaseTtlMs: 90_000,
       outputStore: null,
       allocationOptions,
@@ -119,7 +131,7 @@ describe("BoxLite managed runtime provider", () => {
       workspace,
     }));
     expect(sdk.getOrCreate).toHaveBeenCalledWith(expect.objectContaining({
-      image: "node:22-slim",
+      image: "registry.example/openma-custom:sha256-test",
       autoRemove: false,
       detach: true,
       workingDir: "/workspace",
@@ -209,6 +221,11 @@ describe("BoxLite managed runtime provider", () => {
         workspace: { bindingId: "binding", mountPath: "/workspace" },
         outputs: null,
         credentialEgress: null,
+        environment: {
+          type: "base",
+          identity: "node:22-slim",
+          artifact: { type: "image", reference: "node:22-slim" },
+        },
         signal: new AbortController().signal,
       },
     )).rejects.toThrow("ownership name");

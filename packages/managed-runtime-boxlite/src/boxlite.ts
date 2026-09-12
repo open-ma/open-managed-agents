@@ -1,9 +1,12 @@
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
   type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
   type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -129,6 +132,7 @@ export interface BoxLiteProviderOptions {
 
 export interface BoxLiteManagedRuntimeOptions extends BoxLiteProviderOptions {
   leaseTtlMs: number;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<BoxLiteManagedRuntime>;
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   credentialEgress?: ProviderManagedRuntimeOptions<BoxLiteManagedRuntime>["credentialEgress"];
@@ -489,7 +493,11 @@ function createBoxLiteProviderWithClient(
       const extra = await options.allocationOptions?.({ ...acquisition, name }) ?? {};
       acquisition.signal.throwIfAborted();
       const result = await sdk.getOrCreate({
-        image: options.image,
+        image: requireRuntimeEnvironmentArtifact(
+          acquisition.environment,
+          options.providerId,
+          ["image"],
+        ).reference,
         ...(options.cpus === undefined ? {} : { cpus: options.cpus }),
         ...(options.memoryMib === undefined ? {} : { memoryMib: options.memoryMib }),
         ...(options.diskSizeGb === undefined ? {} : { diskSizeGb: options.diskSizeGb }),
@@ -550,6 +558,12 @@ export function createBoxLiteManagedRuntime(options: BoxLiteManagedRuntimeOption
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: options.image,
+        artifact: { type: "image", reference: options.image },
+      }),
     leaseTtlMs: options.leaseTtlMs,
     sandboxCapabilities: {
       suspendResume: "supported",

@@ -64,7 +64,12 @@ class FakeSandbox implements VercelSandboxSdkPort {
       input.stderr?.end();
       return new FakeCommand();
     }
-    return { exitCode: 0, stdout: async () => "", stderr: async () => "" };
+    const stdout = input.args?.some((argument) =>
+        argument.includes("__OPENMA_RUNTIME_READY__")
+      ) === true
+      ? "__OPENMA_RUNTIME_READY__"
+      : "";
+    return { exitCode: 0, stdout: async () => stdout, stderr: async () => "" };
   });
 
   runCommand(input: Parameters<VercelSandboxSdkPort["runCommand"]>[0] & { detached: true }): Promise<VercelCommandPort>;
@@ -94,7 +99,13 @@ describe("Vercel managed runtime provider", () => {
       outputStore: null,
       createOptions: async ({ scope: acquiredScope }) => {
         expect(acquiredScope).toEqual(scope);
-        return { image: "vercel/sandbox/node:24", timeout: 600_000 };
+        return { image: "stale-image", timeout: 600_000 };
+      },
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "custom-vercel-image",
+        artifact: { type: "image", reference: "vercel/sandbox/node:24" },
+        prepare: async () => {},
       },
     });
     const signal = new AbortController().signal;

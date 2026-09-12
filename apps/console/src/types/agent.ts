@@ -1,5 +1,4 @@
-import type {} from "@openma/sdk";
-import type { BetaManagedAgentsAgent } from "@anthropic-ai/sdk/resources/beta/agents/agents";
+import type { OpenMaAgent } from "@openma/sdk";
 
-/** The Console intentionally renders the official Managed Agent resource. */
-export type AgentRecord = BetaManagedAgentsAgent;
+/** Official Managed Agent resource plus OpenMA's standard stdio MCP extension. */
+export type AgentRecord = OpenMaAgent;

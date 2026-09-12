@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, expectTypeOf, it } from "vitest";
 
-import { OpenMA } from "../src/index.js";
+import { OpenMA, type OpenMaMcpServer } from "../src/index.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -71,7 +71,13 @@ describe("OpenMA SDK composition facade", () => {
           archived_at: null,
           created_at: "2026-09-12T00:00:00.000Z",
           description: null,
-          mcp_servers: [],
+          mcp_servers: [{
+            name: "workspace",
+            type: "stdio",
+            command: "/usr/local/bin/workspace-mcp",
+            args: ["--root", "/workspace"],
+            env: { LOG_LEVEL: "info" },
+          }],
           metadata: {},
           model: {
             id: "claude-opus-5",
@@ -113,6 +119,13 @@ describe("OpenMA SDK composition facade", () => {
         },
         appendable_prompts: ["prompt_review"],
       },
+      mcp_servers: [{
+        name: "workspace",
+        type: "stdio",
+        command: "/usr/local/bin/workspace-mcp",
+        args: ["--root", "/workspace"],
+        env: { LOG_LEVEL: "info" },
+      }],
     });
 
     expect(await captured!.json()).toEqual({
@@ -131,7 +144,22 @@ describe("OpenMA SDK composition facade", () => {
         },
         appendable_prompts: ["prompt_review"],
       },
+      mcp_servers: [{
+        name: "workspace",
+        type: "stdio",
+        command: "/usr/local/bin/workspace-mcp",
+        args: ["--root", "/workspace"],
+        env: { LOG_LEVEL: "info" },
+      }],
     });
+    expect(agent.mcp_servers).toEqual([{
+      name: "workspace",
+      type: "stdio",
+      command: "/usr/local/bin/workspace-mcp",
+      args: ["--root", "/workspace"],
+      env: { LOG_LEVEL: "info" },
+    }]);
+    expectTypeOf(agent.mcp_servers).toEqualTypeOf<OpenMaMcpServer[]>();
     expect(agent._oma?.aux_model?.id).toBe("deepseek-chat");
     expect(agent.model.provider_options).toEqual({
       anthropic: { beta: ["context-1m"] },

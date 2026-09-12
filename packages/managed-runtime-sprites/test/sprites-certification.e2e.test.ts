@@ -72,6 +72,11 @@ describe.runIf(enabled)("Sprites live certification", () => {
       workspace: { bindingId: `workspace-${sessionId}`, mountPath: "/workspace" as const },
       outputs: null,
       credentialEgress: null,
+      environment: {
+        type: "base" as const,
+        identity: "sprites:preinstalled",
+        artifact: { type: "preinstalled" as const },
+      },
       signal: new AbortController().signal,
     };
     let runtime: SpritesRuntime | undefined;

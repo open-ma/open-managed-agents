@@ -19,6 +19,11 @@ describe("BoxLite optional SDK failure", () => {
       workspace: { bindingId: "workspace", mountPath: "/workspace" },
       outputs: null,
       credentialEgress: null,
+      environment: {
+        type: "base",
+        identity: "image",
+        artifact: { type: "image", reference: "image" },
+      },
       signal: new AbortController().signal,
     })).rejects.toThrow("requires '@boxlite-ai/boxlite'");
   });

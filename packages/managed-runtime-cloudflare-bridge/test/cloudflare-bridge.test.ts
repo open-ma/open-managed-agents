@@ -52,7 +52,11 @@ function bridgeFetch() {
     }
     if (request.method === "POST" && operation === "/exec") {
       const argv = (body as { argv?: string[] } | undefined)?.argv ?? [];
-      const commandOutput = argv[0] === "base64" && argv[3] !== undefined
+      const commandOutput = argv.some((argument) =>
+          argument.includes("__OPENMA_RUNTIME_READY__")
+        )
+        ? "__OPENMA_RUNTIME_READY__"
+        : argv[0] === "base64" && argv[3] !== undefined
         ? Buffer.from(files.get(argv[3]) ?? new Uint8Array()).toString("base64")
         : argv[0] === "find"
           ? `${[...files.keys()].filter((path) => path.startsWith("/mnt/session/outputs/"))
@@ -92,6 +96,48 @@ async function streamText(stream: ReadableStream<Uint8Array>): Promise<string> {
 }
 
 describe("Cloudflare Sandbox Bridge managed runtime provider package", () => {
+  it("rejects carrier types that the preinstalled Bridge cannot launch", async () => {
+    const fake = bridgeFetch();
+    const store = new InMemoryBlobStore();
+    const composition = createCloudflareBridgeManagedRuntime({
+      baseUrl: "https://bridge.example.test",
+      apiKey: "bridge-secret",
+      checkpointStore: store,
+      outputStore: null,
+      fetch: fake.fetch,
+      leaseTtlMs: 90_000,
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "unsupported-template",
+        artifact: { type: "template", reference: "template" },
+        prepare: async () => {},
+      },
+    });
+    const scope = { workspaceId: "workspace", environmentId: "environment", sessionId: "session", workId: "work" };
+    const fence = { ...scope, ownerId: "owner", generation: 1, token: "token", expiresAt: "2026-09-07T12:00:00.000Z" };
+    const signal = new AbortController().signal;
+    const workspace = await composition.workspace.materialize({
+      scope, fence, strategy: "checkpoint_restore", activeCheckpoint: null,
+      idempotencyKey: "environment", signal,
+    });
+    await expect(composition.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    })).rejects.toThrow(
+      "cloudflare-sandbox-bridge cannot launch Environment artifact template",
+    );
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it("projects the bridge through the same swappable provider driver Port", async () => {
     const createDriver = Reflect.get(
       cloudflareBridge,

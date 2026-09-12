@@ -29,9 +29,13 @@ function textStream(value = ""): ReadableStream<string> {
 
 class FakeProcess implements ModalProcessPort {
   readonly stdin = new WritableStream<string>();
-  readonly stdout = textStream("worker output");
+  readonly stdout: ReadableStream<string>;
   readonly stderr = textStream();
   readonly wait = vi.fn(async () => 0);
+
+  constructor(output = "worker output") {
+    this.stdout = textStream(output);
+  }
 }
 
 class FakeSandbox implements ModalSandboxSdkPort {
@@ -45,7 +49,12 @@ class FakeSandbox implements ModalSandboxSdkPort {
     writeBytes: vi.fn(async () => {}),
   };
   readonly poll = vi.fn(async () => null);
-  readonly exec = vi.fn(async () => new FakeProcess());
+  readonly exec = vi.fn(async (command: string[]) =>
+    new FakeProcess(
+      command.some((argument) => argument.includes("__OPENMA_RUNTIME_READY__"))
+        ? "__OPENMA_RUNTIME_READY__"
+        : "worker output",
+    ));
   readonly getTags = vi.fn(async () => this.tags);
   readonly setTags = vi.fn(async (tags: Record<string, string>) => { this.tags = tags; });
   readonly updateNetworkPolicy = vi.fn(async () => {});
@@ -72,6 +81,12 @@ describe("Modal managed runtime provider", () => {
       client,
       appName: "openma",
       image: "node:22-slim",
+      runtimeEnvironment: {
+        type: "custom",
+        identity: "custom-modal-image",
+        artifact: { type: "image", reference: "registry.example/openma-modal:custom" },
+        prepare: async () => {},
+      },
       workspaceVolumeName: "openma-workspaces-v2",
       leaseTtlMs: 90_000,
       outputStore: null,
@@ -101,7 +116,7 @@ describe("Modal managed runtime provider", () => {
 
     expect(client.create).toHaveBeenCalledWith(expect.objectContaining({
       appName: "openma",
-      image: "node:22-slim",
+      image: "registry.example/openma-modal:custom",
       name: expect.stringMatching(/^oma-[a-f0-9]{32}$/),
       tags: expect.objectContaining({ openma: "managed" }),
       workspace: {

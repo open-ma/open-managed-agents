@@ -1,9 +1,12 @@
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
   type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
   type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -163,6 +166,7 @@ export interface SuperserveProviderOptions {
 
 export interface SuperserveManagedRuntimeOptions extends SuperserveProviderOptions {
   leaseTtlMs: number;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<SuperserveRuntime>;
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   credentialEgress?: ProviderManagedRuntimeOptions<SuperserveRuntime>["credentialEgress"];
@@ -505,15 +509,29 @@ async function acquireSandbox(
       name,
       ownershipMetadata: metadata,
     }) ?? {};
+    const artifact = requireRuntimeEnvironmentArtifact(
+      acquisition.environment,
+      providerName,
+      ["template", "snapshot", "preinstalled", "bootstrap"],
+    );
+    const {
+      fromTemplate: _ignoredTemplate,
+      fromSnapshot: _ignoredSnapshot,
+      ...safeExtra
+    } = extra;
     const network = await options.network?.({ ...acquisition, name }) ?? {
       allowOut: ["*.superserve.ai"],
       denyOut: ["0.0.0.0/0"],
     };
     try {
       sandbox = await sdk.create({
-        ...extra,
+        ...safeExtra,
         name,
-        ...(options.fromTemplate === undefined ? {} : { fromTemplate: options.fromTemplate }),
+        ...(artifact.type === "template"
+          ? { fromTemplate: artifact.reference }
+          : artifact.type === "snapshot"
+            ? { fromSnapshot: artifact.reference }
+            : {}),
         metadata,
         network,
         // Provider retention is deliberate: OpenMA owns hard deletion.
@@ -613,6 +631,17 @@ export function createSuperserveManagedRuntime(options: SuperserveManagedRuntime
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? (options.fromTemplate === undefined
+        ? createPreinstalledRuntimeEnvironment({
+            type: "base",
+            identity: "superserve:preinstalled",
+          })
+        : createPreinstalledRuntimeEnvironment({
+            type: "base",
+            identity: options.fromTemplate,
+            artifact: { type: "template", reference: options.fromTemplate },
+          })),
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {

@@ -121,7 +121,14 @@ function acquisition(signal = new AbortController().signal) {
       driver: { type: "ama_worker" as const, process: { command: "worker" } },
     },
     workspace: { bindingId: "workspace", mountPath: "/workspace" as const },
-    outputs: null, credentialEgress: null, signal,
+    outputs: null,
+    credentialEgress: null,
+    environment: {
+      type: "base" as const,
+      identity: "template",
+      artifact: { type: "template" as const, reference: "template" },
+    },
+    signal,
   };
 }
 

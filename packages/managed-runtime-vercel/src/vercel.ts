@@ -1,9 +1,12 @@
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
+  createPreinstalledRuntimeEnvironment,
   createProviderManagedRuntime,
+  requireRuntimeEnvironmentArtifact,
   type ProviderManagedRuntimeAcquisitionContext,
   type ProviderManagedRuntimeOptions,
   type ProviderManagedRuntimeProviderPort,
+  type ProviderRuntimeEnvironment,
 } from "@open-managed-agents/managed-runtime-sandbox";
 import type {
   ManagedRuntimeProviderDriverPort,
@@ -62,6 +65,7 @@ export interface VercelProviderOptions {
 
 export interface VercelManagedRuntimeOptions extends VercelProviderOptions {
   leaseTtlMs: number;
+  runtimeEnvironment?: ProviderRuntimeEnvironment<VercelRuntime>;
   outputStore?: BlobStore | null;
   outputKeyPrefix?: string;
   credentialEgress?: ProviderManagedRuntimeOptions<VercelRuntime>["credentialEgress"];
@@ -336,8 +340,19 @@ function createProviderWithSdk(
         options.createOptions?.({ ...acquisition, name, ownershipTags: tags }) ?? {},
         options.networkPolicy?.({ ...acquisition, name }) ?? "deny-all",
       ]);
+      const artifact = requireRuntimeEnvironmentArtifact(
+        acquisition.environment,
+        providerName,
+        ["image", "snapshot", "preinstalled", "bootstrap"],
+      );
+      const carrier = artifact.type === "image"
+        ? { image: artifact.reference }
+        : artifact.type === "snapshot"
+          ? { source: { type: "snapshot" as const, snapshotId: artifact.reference } }
+          : {};
       const sandbox = await sdk.getOrCreate({
         ...extra,
+        ...carrier,
         name,
         persistent: true,
         resume: true,
@@ -410,6 +425,11 @@ export function createVercelManagedRuntime(options: VercelManagedRuntimeOptions)
       workdir: "/workspace",
     }),
     environment: (): SandboxFactoryEnv => ({}),
+    runtimeEnvironment: options.runtimeEnvironment
+      ?? createPreinstalledRuntimeEnvironment({
+        type: "base",
+        identity: "vercel:preinstalled",
+      }),
     leaseTtlMs: options.leaseTtlMs,
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
     sandboxCapabilities: {
